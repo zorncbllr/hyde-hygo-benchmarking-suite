@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "benchsuite",
+  "version": "0.1.0",
+  "identifier": "com.hydego.benchsuite",
+  "build": {
+    "features": ["pytauri/standalone"],
+    "beforeDevCommand": "cd ../ui && bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "cd ../ui && bun run build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "HyDE-HyGO Benchmarking Suite",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
