@@ -3,7 +3,8 @@ import { Pause, Play, RotateCcw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
-import BenchScene, { normalizePositions } from "@/components/scene/BenchScene";
+import BenchScene from "@/components/scene/BenchScene";
+import { normalizePositions } from "@/lib/scene-utils";
 import SceneStatsOverlay, {
   type SceneStatRow,
 } from "@/components/scene/SceneStatsOverlay";
@@ -48,10 +49,11 @@ export default function Replay3D({
   runIdx,
   payloadsByAlgo,
 }: Replay3DProps) {
-  const history = histories[runIdx] ?? [];
   const [idx, setIdx] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(2);
+
+  const history = useMemo(() => histories[runIdx] ?? [], [histories, runIdx]);
 
   // reset when the replayed run changes
   useEffect(() => {

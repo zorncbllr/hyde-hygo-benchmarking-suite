@@ -8,7 +8,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import BenchScene, { normalizePositions } from "@/components/scene/BenchScene";
+import BenchScene from "@/components/scene/BenchScene";
+import { normalizePositions } from "@/lib/scene-utils";
 import { buildHeightField } from "@/components/scene/heightField";
 import { useSurface } from "@/hooks/useSurface";
 import { useLiveStore } from "@/stores/live";

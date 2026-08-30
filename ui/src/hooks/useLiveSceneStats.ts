@@ -20,7 +20,6 @@ export function useLiveSceneStats(): {
   const algoStats = useLiveStore((s) => s.algoStats);
   const currentScenario = useLiveStore((s) => s.currentScenario);
   const currentDim = useLiveStore((s) => s.currentScenarioDim);
-  const currentAlgo = useLiveStore((s) => s.currentAlgo);
 
   return useMemo(() => {
     const entries = ALGO_KEYS.filter((k) => algoStats[k]).map((k) => ({
@@ -47,5 +46,5 @@ export function useLiveSceneStats(): {
         ? `best cost - ${currentScenario} ${currentDim ?? ""}D`
         : "best cost",
     };
-  }, [algoStats, currentScenario, currentDim, currentAlgo]);
+  }, [algoStats, currentScenario, currentDim]);
 }
