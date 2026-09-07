@@ -16,6 +16,20 @@ export default defineConfig(async () => ({
     },
   },
 
+  // Split the heaviest vendor libraries into parallel chunks so the initial
+  // parse cost is lower (the main chunk was ~2.6 MB with everything inline).
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          three: ["three", "@react-three/fiber", "@react-three/drei"],
+          echarts: ["echarts"],
+          vendor: ["react", "react-dom", "react-router-dom", "zustand"],
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

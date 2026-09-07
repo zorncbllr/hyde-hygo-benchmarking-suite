@@ -227,12 +227,16 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   reset: () => set(initial),
 }));
 
-export function overallProgress(state: LiveState): number {
+export function overallProgress(
+  state: Pick<LiveState, "totalRuns" | "completedRuns">,
+): number {
   if (state.totalRuns === 0) return 0;
   return Math.min(100, (state.completedRuns / state.totalRuns) * 100);
 }
 
-export function activeAlgos(state: LiveState): AlgoKey[] {
+export function activeAlgos(
+  state: Pick<LiveState, "rows" | "curves">,
+): AlgoKey[] {
   const present = new Set(state.rows.map((r) => r.algo_key));
   return ALGO_KEYS.filter((k) => present.has(k) || state.curves[k]?.length);
 }

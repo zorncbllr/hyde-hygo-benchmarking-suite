@@ -36,7 +36,12 @@ export default function BenchScene({
   return (
     <div className="relative h-full w-full">
       {overlay}
-      <Canvas camera={{ position: [0.6, 1.5, 1.6], fov: 50 }}>
+      <Canvas
+        camera={{ position: [0.6, 1.5, 1.6], fov: 50 }}
+        frameloop="demand"
+        dpr={[1, 1.5]}
+        gl={{ powerPreference: "high-performance" }}
+      >
         <color attach="background" args={["#0c0c0f"]} />
         <ambientLight intensity={0.75} />
         <directionalLight position={[2, 3, 2]} intensity={1.1} />

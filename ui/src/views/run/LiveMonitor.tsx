@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { memo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { AlertCircle, CheckCircle2, Play, XCircle } from "lucide-react";
 import { toast } from "sonner";
@@ -24,7 +24,13 @@ import {
   type AlgoKey,
 } from "@/lib/schemas";
 import { formatDuration, formatMs, formatSci } from "@/lib/formatters";
-import { activeAlgos, overallProgress, useLiveStore } from "@/stores/live";
+import {
+  activeAlgos,
+  overallProgress,
+  useLiveStore,
+  type LiveRow,
+  type ScenarioSummary,
+} from "@/stores/live";
 
 const STATUS_BADGE: Record<
   string,
@@ -40,28 +46,138 @@ const STATUS_BADGE: Record<
   error: { label: "error", variant: "destructive" },
 };
 
+const ALGO_ORDER: AlgoKey[] = ["hyde_bin", "hyde_qub", "hyde_con", "hygo"];
+
+/** Completed-scenario medians table; re-renders only when summaries change. */
+const ScenarioSummariesTable = memo(function ScenarioSummariesTable({
+  summaries,
+}: {
+  summaries: ScenarioSummary[];
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Scenario</TableHead>
+          {ALGO_ORDER.map((k) => (
+            <TableHead key={k} className="text-right">
+              <span
+                className="mr-1 inline-block h-2 w-2 rounded-full"
+                style={{ backgroundColor: ALGO_COLORS[k] }}
+              />
+              {ALGO_LABELS[k]}
+            </TableHead>
+          ))}
+          <TableHead className="text-right">best</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {summaries.map((s) => (
+          <TableRow key={s.key}>
+            <TableCell className="font-medium">{s.key}</TableCell>
+            {ALGO_ORDER.map((k) => (
+              <TableCell key={k} className="text-right font-mono text-xs">
+                {formatSci(s.medians[k] ?? Number.NaN)}
+              </TableCell>
+            ))}
+            <TableCell className="text-right">
+              <Badge variant="secondary">
+                {ALGO_LABELS[s.best_algo as AlgoKey] ?? s.best_algo}
+              </Badge>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+});
+
+/** Recent-run rows table; re-renders only when rows change. */
+const RecentRunsTable = memo(function RecentRunsTable({
+  rows,
+}: {
+  rows: LiveRow[];
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Scenario</TableHead>
+          <TableHead>Algorithm</TableHead>
+          <TableHead className="text-right">Run</TableHead>
+          <TableHead className="text-right">Best cost</TableHead>
+          <TableHead className="text-right">Wall</TableHead>
+          <TableHead className="text-right">Conv gen</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((r) => (
+          <TableRow key={r.key}>
+            <TableCell>
+              {r.fname} {r.dim}D
+            </TableCell>
+            <TableCell>
+              <span
+                className="mr-2 inline-block h-2 w-2 rounded-full"
+                style={{
+                  backgroundColor: ALGO_COLORS[r.algo_key as AlgoKey] ?? "#fff",
+                }}
+              />
+              {ALGO_LABELS[r.algo_key as AlgoKey] ?? r.algo_key}
+            </TableCell>
+            <TableCell className="text-right">
+              {r.run_idx + 1}/{r.n_runs}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatSci(r.best_cost)}
+            </TableCell>
+            <TableCell className="text-right">{formatMs(r.wall_ms)}</TableCell>
+            <TableCell className="text-right">{r.conv_gen ?? "-"}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+});
+
 export default function LiveMonitor() {
   // event subscription is owned by the RunView wrapper (this component is
   // always rendered under it); subscribing here too would double-count events
-  const store = useLiveStore();
+  //
+  // Fields are subscribed individually: telemetry events mutate only a few of
+  // them, so the tables below (memoized on rows/summaries identity) skip
+  // re-rendering at telemetry rate.
+  const status = useLiveStore((s) => s.status);
+  const error = useLiveStore((s) => s.error);
+  const runId = useLiveStore((s) => s.runId);
+  const totalRuns = useLiveStore((s) => s.totalRuns);
+  const completedRuns = useLiveStore((s) => s.completedRuns);
+  const scenarios = useLiveStore((s) => s.scenarios);
+  const scenariosDone = useLiveStore((s) => s.scenariosDone);
+  const elapsedS = useLiveStore((s) => s.elapsedS);
+  const currentScenario = useLiveStore((s) => s.currentScenario);
+  const currentScenarioDim = useLiveStore((s) => s.currentScenarioDim);
+  const currentAlgo = useLiveStore((s) => s.currentAlgo);
+  const curves = useLiveStore((s) => s.curves);
+  const scenarioSummaries = useLiveStore((s) => s.scenarioSummaries);
+  const rows = useLiveStore((s) => s.rows);
   const navigate = useNavigate();
 
   // keep an ETA estimate based on completed runs (rolling wall time)
   useEffect(() => {
-    if (store.status !== "running") return;
+    if (status !== "running") return;
     const id = setInterval(() => {
       useLiveStore.setState((s) => ({ elapsedS: s.elapsedS + 1 }));
     }, 1000);
     return () => clearInterval(id);
-  }, [store.status]);
+  }, [status]);
 
-  const progress = overallProgress(store);
+  const progress = overallProgress({ totalRuns, completedRuns });
   const etaS =
-    store.completedRuns > 1
-      ? (store.elapsedS / store.completedRuns) *
-        (store.totalRuns - store.completedRuns)
+    completedRuns > 1
+      ? (elapsedS / completedRuns) * (totalRuns - completedRuns)
       : null;
-  const badge = STATUS_BADGE[store.status];
+  const badge = STATUS_BADGE[status];
 
   async function cancel() {
     try {
@@ -83,32 +199,28 @@ export default function LiveMonitor() {
         </div>
         <div className="flex items-center gap-3">
           <Badge variant={badge.variant} className="gap-1">
-            {store.status === "running" && (
-              <Play className="h-3 w-3 animate-pulse" />
-            )}
-            {store.status === "completed" && (
-              <CheckCircle2 className="h-3 w-3" />
-            )}
-            {(store.status === "error" || store.status === "cancelled") && (
+            {status === "running" && <Play className="h-3 w-3 animate-pulse" />}
+            {status === "completed" && <CheckCircle2 className="h-3 w-3" />}
+            {(status === "error" || status === "cancelled") && (
               <XCircle className="h-3 w-3" />
             )}
-            {store.status === "error" && <AlertCircle className="h-3 w-3" />}
+            {status === "error" && <AlertCircle className="h-3 w-3" />}
             {badge.label}
           </Badge>
-          {store.status === "running" && (
+          {status === "running" && (
             <Button variant="destructive" size="sm" onClick={cancel}>
               Cancel
             </Button>
           )}
-          {(store.status === "completed" ||
-            store.status === "cancelled" ||
-            store.status === "error") && (
+          {(status === "completed" ||
+            status === "cancelled" ||
+            status === "error") && (
             <>
-              {store.status === "completed" && (
+              {status === "completed" && (
                 <Button
                   size="sm"
                   onClick={() =>
-                    navigate("/results", { state: { runId: store.runId } })
+                    navigate("/results", { state: { runId: runId } })
                   }
                 >
                   View results
@@ -126,10 +238,10 @@ export default function LiveMonitor() {
         </div>
       </div>
 
-      {store.error && (
+      {error && (
         <Card className="border-destructive">
           <CardContent className="pt-6 text-sm text-destructive">
-            {store.error}
+            {error}
           </CardContent>
         </Card>
       )}
@@ -138,9 +250,9 @@ export default function LiveMonitor() {
         <CardHeader>
           <CardTitle className="text-base">
             Progress
-            {store.runId && (
+            {runId && (
               <code className="ml-2 text-xs font-normal text-muted-foreground">
-                {store.runId.slice(0, 8)}
+                {runId.slice(0, 8)}
               </code>
             )}
           </CardTitle>
@@ -151,22 +263,22 @@ export default function LiveMonitor() {
             <span>
               runs:{" "}
               <span className="font-medium text-foreground">
-                {store.completedRuns} / {store.totalRuns}
+                {completedRuns} / {totalRuns}
               </span>
             </span>
             <span>
               scenarios:{" "}
               <span className="font-medium text-foreground">
-                {store.scenariosDone} / {store.scenarios}
+                {scenariosDone} / {scenarios}
               </span>
             </span>
             <span>
               elapsed:{" "}
               <span className="font-medium text-foreground">
-                {formatDuration(store.elapsedS)}
+                {formatDuration(elapsedS)}
               </span>
             </span>
-            {etaS !== null && store.status === "running" && (
+            {etaS !== null && status === "running" && (
               <span>
                 eta:{" "}
                 <span className="font-medium text-foreground">
@@ -174,18 +286,18 @@ export default function LiveMonitor() {
                 </span>
               </span>
             )}
-            {store.currentScenario && (
+            {currentScenario && (
               <span>
                 now:{" "}
                 <span className="font-medium text-foreground">
-                  {store.currentScenario} {store.currentScenarioDim}D
+                  {currentScenario} {currentScenarioDim}D
                 </span>
-                {store.currentAlgo && (
+                {currentAlgo && (
                   <span
                     className="ml-2 inline-block h-2 w-2 rounded-full"
                     style={{
                       backgroundColor:
-                        ALGO_COLORS[store.currentAlgo as AlgoKey] ?? "#fff",
+                        ALGO_COLORS[currentAlgo as AlgoKey] ?? "#fff",
                     }}
                   />
                 )}
@@ -202,16 +314,16 @@ export default function LiveMonitor() {
             <CardHeader>
               <CardTitle className="text-base">
                 Live convergence
-                {store.currentScenario && (
+                {currentScenario && (
                   <span className="ml-2 text-sm font-normal text-muted-foreground">
-                    {store.currentScenario} {store.currentScenarioDim}D
+                    {currentScenario} {currentScenarioDim}D
                   </span>
                 )}
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {activeAlgos(store).length > 0 ? (
-                <ConvergenceChart curves={store.curves} />
+              {activeAlgos({ rows, curves }).length > 0 ? (
+                <ConvergenceChart curves={curves} />
               ) : (
                 <p className="py-16 text-center text-sm text-muted-foreground">
                   Waiting for the first generation telemetry...
@@ -225,64 +337,13 @@ export default function LiveMonitor() {
               <CardTitle className="text-base">Completed scenarios</CardTitle>
             </CardHeader>
             <CardContent>
-              {store.scenarioSummaries.length === 0 ? (
+              {scenarioSummaries.length === 0 ? (
                 <p className="py-16 text-center text-sm text-muted-foreground">
                   No scenario finished yet.
                 </p>
               ) : (
                 <div className="max-h-80 overflow-y-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Scenario</TableHead>
-                        {(
-                          [
-                            "hyde_bin",
-                            "hyde_qub",
-                            "hyde_con",
-                            "hygo",
-                          ] as AlgoKey[]
-                        ).map((k) => (
-                          <TableHead key={k} className="text-right">
-                            <span
-                              className="mr-1 inline-block h-2 w-2 rounded-full"
-                              style={{ backgroundColor: ALGO_COLORS[k] }}
-                            />
-                            {ALGO_LABELS[k]}
-                          </TableHead>
-                        ))}
-                        <TableHead className="text-right">best</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {store.scenarioSummaries.map((s) => (
-                        <TableRow key={s.key}>
-                          <TableCell className="font-medium">{s.key}</TableCell>
-                          {(
-                            [
-                              "hyde_bin",
-                              "hyde_qub",
-                              "hyde_con",
-                              "hygo",
-                            ] as AlgoKey[]
-                          ).map((k) => (
-                            <TableCell
-                              key={k}
-                              className="text-right font-mono text-xs"
-                            >
-                              {formatSci(s.medians[k] ?? Number.NaN)}
-                            </TableCell>
-                          ))}
-                          <TableCell className="text-right">
-                            <Badge variant="secondary">
-                              {ALGO_LABELS[s.best_algo as AlgoKey] ??
-                                s.best_algo}
-                            </Badge>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                  <ScenarioSummariesTable summaries={scenarioSummaries} />
                 </div>
               )}
             </CardContent>
@@ -302,60 +363,18 @@ export default function LiveMonitor() {
           <CardTitle className="text-base">
             Recent runs
             <span className="ml-2 text-sm font-normal text-muted-foreground">
-              (latest {store.rows.length})
+              (latest {rows.length})
             </span>
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {store.rows.length === 0 ? (
+          {rows.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No run finished yet.
             </p>
           ) : (
             <div className="max-h-96 overflow-y-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Scenario</TableHead>
-                    <TableHead>Algorithm</TableHead>
-                    <TableHead className="text-right">Run</TableHead>
-                    <TableHead className="text-right">Best cost</TableHead>
-                    <TableHead className="text-right">Wall</TableHead>
-                    <TableHead className="text-right">Conv gen</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {store.rows.map((r) => (
-                    <TableRow key={r.key}>
-                      <TableCell>
-                        {r.fname} {r.dim}D
-                      </TableCell>
-                      <TableCell>
-                        <span
-                          className="mr-2 inline-block h-2 w-2 rounded-full"
-                          style={{
-                            backgroundColor:
-                              ALGO_COLORS[r.algo_key as AlgoKey] ?? "#fff",
-                          }}
-                        />
-                        {ALGO_LABELS[r.algo_key as AlgoKey] ?? r.algo_key}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {r.run_idx + 1}/{r.n_runs}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
-                        {formatSci(r.best_cost)}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {formatMs(r.wall_ms)}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {r.conv_gen ?? "-"}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <RecentRunsTable rows={rows} />
             </div>
           )}
         </CardContent>

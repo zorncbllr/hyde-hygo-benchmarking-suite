@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { useThree } from "@react-three/fiber";
 import { ALGO_COLORS, type AlgoKey } from "@/lib/schemas";
 
 interface SearchPointsProps {
@@ -75,7 +76,9 @@ export default function SearchPoints({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [algosKey]);
 
-  // Update buffers at telemetry rate.
+  // Update buffers at telemetry rate. The canvas renders on demand, so each
+  // buffer write must explicitly request a frame.
+  const invalidate = useThree((s) => s.invalidate);
   useEffect(() => {
     for (const [algo, obj] of Object.entries(objectsRef.current)) {
       const show = visible[algo as AlgoKey] ?? true;
@@ -108,7 +111,8 @@ export default function SearchPoints({
       );
       obj.line.geometry.computeBoundingSphere();
     }
-  }, [positions, trajectories, visible, heightAt]);
+    invalidate();
+  }, [positions, trajectories, visible, heightAt, invalidate]);
 
   return (
     <group>

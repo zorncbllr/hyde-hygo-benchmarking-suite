@@ -79,7 +79,10 @@ export default function Replay3D({
     () => buildHeightField(surface.zs, true),
     [surface],
   );
-  const heightAt = heightField?.sample ?? (() => 1.0);
+  const heightAt = useMemo(
+    () => heightField?.sample ?? (() => 1.0),
+    [heightField],
+  );
 
   const current = history[Math.min(idx, Math.max(0, history.length - 1))];
   const positions = useMemo(() => {

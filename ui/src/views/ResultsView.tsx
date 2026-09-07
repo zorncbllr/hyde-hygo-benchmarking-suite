@@ -23,6 +23,9 @@ import {
 import { formatDuration } from "@/lib/formatters";
 import RunDetail from "@/components/results/RunDetail";
 
+/** Debounce window for the search input before refetching the run list. */
+export const SEARCH_DEBOUNCE_MS = 300;
+
 const STATUS_VARIANT: Record<
   string,
   "default" | "secondary" | "destructive" | "outline"
@@ -47,8 +50,15 @@ export default function ResultsView() {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [selected, setSelected] = useState<string | null>(handedOffRunId);
   const [detail, setDetail] = useState<RunDetailResponse | null>(null);
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+
+  // Debounce keystrokes so typing does not fire a list_runs call per key.
+  useEffect(() => {
+    const id = setTimeout(() => setSearch(searchInput), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [searchInput]);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -58,16 +68,21 @@ export default function ResultsView() {
         per_page: 100,
       });
       setRuns(res.items);
-      // prefer the handed-off run; fall back to the newest entry
+      // prefer the handed-off run; keep the current selection when it still
+      // exists (functional update avoids refetching on every selection change)
       if (handedOffRunId && res.items.some((r) => r.id === handedOffRunId)) {
         setSelected(handedOffRunId);
-      } else if (!res.items.some((r) => r.id === selected)) {
-        setSelected(res.items[0]?.id ?? null);
+      } else {
+        setSelected((prev) =>
+          prev !== null && res.items.some((r) => r.id === prev)
+            ? prev
+            : (res.items[0]?.id ?? null),
+        );
       }
     } catch (err) {
       toast.error(`Failed to load run history: ${String(err)}`);
     }
-  }, [statusFilter, search, selected, handedOffRunId]);
+  }, [statusFilter, search, handedOffRunId]);
 
   useEffect(() => {
     loadRuns();
@@ -107,9 +122,12 @@ export default function ResultsView() {
             <Input
               className="h-8"
               placeholder="Search label or notes..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && refresh()}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                // flush the pending debounce immediately on Enter
+                if (e.key === "Enter") setSearch(searchInput);
+              }}
             />
             <Button size="icon" variant="ghost" onClick={refresh}>
               <Search className="h-4 w-4" />

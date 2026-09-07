@@ -52,7 +52,12 @@ export default function LivePreviewCard() {
     () => (surface ? normalizePositions(rawTrajectories, surface) : {}),
     [rawTrajectories, surface],
   );
-  const heightAt = heightField?.sample ?? (() => 1.0);
+  // stable identity: keeps SearchPoints' buffer effect from re-running on
+  // every parent render when the field itself did not change
+  const heightAt = useMemo(
+    () => heightField?.sample ?? (() => 1.0),
+    [heightField],
+  );
   const { rows: statRows, caption: statsCaption } = useLiveSceneStats();
   const overlay = <SceneStatsOverlay rows={statRows} caption={statsCaption} />;
 
