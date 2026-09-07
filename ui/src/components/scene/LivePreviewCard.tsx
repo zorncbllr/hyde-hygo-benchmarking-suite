@@ -121,7 +121,7 @@ export default function LivePreviewCard() {
       </div>
 
       <Dialog open={maximized} onOpenChange={setMaximized}>
-        <DialogContent className="h-screen max-h-screen w-screen max-w-screen rounded-none border-none">
+        <DialogContent className="h-screen max-h-screen w-screen max-w-none rounded-none border-none sm:max-w-none">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-base">
               3D preview
