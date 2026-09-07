@@ -10,6 +10,7 @@ landing inside the run's artifact directory.
 from __future__ import annotations
 
 import json
+import math
 import threading
 from pathlib import Path
 from typing import Callable, Literal
@@ -104,8 +105,8 @@ class ExportRunner:
 # -- synchronous export pipeline ------------------------------------------------
 
 
-def _load_results(run_dir: Path) -> dict:
-    path = run_dir / "benchmark_results.json"
+def load_results(run_dir: Path) -> dict:
+    path = Path(run_dir) / "benchmark_results.json"
     if not path.exists():
         raise FileNotFoundError(
             "benchmark_results.json not found; run the benchmark first"
@@ -113,8 +114,10 @@ def _load_results(run_dir: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _write_json(path: Path, data) -> None:
-    """JSON dump tolerant of numpy scalars and arrays."""
+def _jsonify(data):
+    """Recursively convert numpy scalars/arrays to plain JSON types and
+    replace non-finite floats with ``None`` (serde_json cannot transport
+    NaN/Infinity over IPC)."""
 
     def default(obj):
         import numpy as np
@@ -125,9 +128,66 @@ def _write_json(path: Path, data) -> None:
             return obj.tolist()
         return str(obj)
 
-    path.write_text(
-        json.dumps(data, indent=2, default=default), encoding="utf-8"
-    )
+    def sanitize(obj):
+        if isinstance(obj, dict):
+            return {k: sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [sanitize(v) for v in obj]
+        if isinstance(obj, float) and not math.isfinite(obj):
+            return None
+        return obj
+
+    return sanitize(json.loads(json.dumps(data, default=default)))
+
+
+def _write_json(path: Path, data) -> None:
+    """Atomically write ``data`` as pretty JSON (numpy-tolerant, IPC-safe)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(_jsonify(data), indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def compute_analysis_summary(all_results: dict) -> dict:
+    """Compute the statistical analysis snapshot that backs the DOCX report
+    (sections (a)-(e)) through the reference implementation's own functions.
+
+    Shared by the export pipeline and the on-demand analysis command so the
+    desktop UI always mirrors the exported report without re-exporting.
+    """
+    import hyde_bench.run_benchmark as rb
+
+    friedman_obj = rb.friedman_objective_error(all_results)
+    kruskal_results = [
+        rb.run_kruskal_per_scenario(key, entry)
+        for key, entry in all_results.items()
+    ]
+    cochran_result = rb.cochrans_q_test(all_results)
+    chi2_conv_results = [
+        rb.chi2_convergence_per_scenario(key, entry)
+        for key, entry in all_results.items()
+    ]
+    friedman_wt = rb.friedman_wall_time(all_results)
+    wt_kruskal_results = [
+        rb.kruskal_wall_time_per_scenario(key, entry)
+        for key, entry in all_results.items()
+    ]
+    margin_results = [
+        rb.wilcoxon_margin_vs_hygo(key, entry, hyde_key)
+        for key, entry in all_results.items()
+        for hyde_key in rb.HYDE_KEYS
+    ]
+    scaling_results = rb.run_scaling_analysis(all_results)
+
+    return {
+        "friedman_objective_error": friedman_obj,
+        "kruskal_per_scenario": kruskal_results,
+        "cochrans_q": cochran_result,
+        "chi2_convergence": chi2_conv_results,
+        "friedman_wall_time": friedman_wt,
+        "wall_time_kruskal": wt_kruskal_results,
+        "margin_vs_hygo": margin_results,
+        "scaling": scaling_results,
+    }
 
 
 def _reconstruct_results(payload: dict) -> list[dict]:
@@ -164,7 +224,7 @@ def run_exports_sync(
 
     detail = svc.get_run_detail(run_id)
     run_dir = Path(detail["output_dir"])
-    all_results = _load_results(run_dir)
+    all_results = load_results(run_dir)
 
     artifacts: dict[str, list[str]] = {group: [] for group in groups}
 
@@ -184,40 +244,18 @@ def run_exports_sync(
             artifacts["json"].append(str(run_dir / "benchmark_results.json"))
 
         report("statistical analyses")
-        friedman_obj = rb.friedman_objective_error(all_results)
-        kruskal_results = [
-            rb.run_kruskal_per_scenario(key, entry)
-            for key, entry in all_results.items()
-        ]
-        cochran_result = rb.cochrans_q_test(all_results)
-        chi2_conv_results = [
-            rb.chi2_convergence_per_scenario(key, entry)
-            for key, entry in all_results.items()
-        ]
-        friedman_wt = rb.friedman_wall_time(all_results)
-        wt_kruskal_results = [
-            rb.kruskal_wall_time_per_scenario(key, entry)
-            for key, entry in all_results.items()
-        ]
-        margin_results = [
-            rb.wilcoxon_margin_vs_hygo(key, entry, hyde_key)
-            for key, entry in all_results.items()
-            for hyde_key in rb.HYDE_KEYS
-        ]
-        scaling_results = rb.run_scaling_analysis(all_results)
+        analysis_summary = compute_analysis_summary(all_results)
+        friedman_obj = analysis_summary["friedman_objective_error"]
+        kruskal_results = analysis_summary["kruskal_per_scenario"]
+        cochran_result = analysis_summary["cochrans_q"]
+        chi2_conv_results = analysis_summary["chi2_convergence"]
+        friedman_wt = analysis_summary["friedman_wall_time"]
+        wt_kruskal_results = analysis_summary["wall_time_kruskal"]
+        margin_results = analysis_summary["margin_vs_hygo"]
+        scaling_results = analysis_summary["scaling"]
 
         # Persist a JSON snapshot of the statistical analyses so the UI can
         # render them without recomputation.
-        analysis_summary = {
-            "friedman_objective_error": friedman_obj,
-            "kruskal_per_scenario": kruskal_results,
-            "cochrans_q": cochran_result,
-            "chi2_convergence": chi2_conv_results,
-            "friedman_wall_time": friedman_wt,
-            "wall_time_kruskal": wt_kruskal_results,
-            "margin_vs_hygo": margin_results,
-            "scaling": scaling_results,
-        }
         _write_json(run_dir / "analysis_summary.json", analysis_summary)
         artifacts.setdefault("json", []).append(
             str(run_dir / "analysis_summary.json")

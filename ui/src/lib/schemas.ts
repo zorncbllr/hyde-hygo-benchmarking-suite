@@ -324,6 +324,117 @@ export const scenarioPayloadsResponseSchema = z.record(
   scenarioPayloadSchema,
 );
 
+// -- Statistical analysis snapshot (mirror of src/suite/exports.py
+//    analysis_summary.json; feeds the DOCX report sections (a)-(e)) --------
+
+export const nemenyiPairSchema = z.object({
+  pair: z.string(),
+  mean_rank_i: z.number().nullable(),
+  mean_rank_j: z.number().nullable(),
+  rank_diff: z.number().nullable(),
+  critical_diff: z.number().nullable(),
+  significant: z.boolean().nullable(),
+  direction: z.string().nullable(),
+});
+
+export const friedmanObjectiveErrorSchema = z.object({
+  chi2: z.number(),
+  p_friedman: z.number(),
+  sig: z.boolean(),
+  mean_ranks: z.record(z.string(), z.number().nullable()),
+  best_algo: z.string(),
+  critical_diff: z.number().nullable(),
+  nemenyi: z.array(nemenyiPairSchema),
+  n_benchmarks: z.number().int(),
+});
+
+export const kruskalRowSchema = z.object({
+  key: z.string(),
+  h_stat: z.number(),
+  p_kruskal: z.number(),
+  sig: z.boolean(),
+  best_algo: z.string(),
+  posthoc: z.unknown().optional(),
+  note: z.string().optional(),
+});
+
+export const cochransQSchema = z.object({
+  Q_stat: z.number(),
+  p_value: z.number(),
+  df: z.number().int().optional(),
+  sig: z.boolean(),
+  n_total_obs: z.number().int().optional(),
+  conv_rates: z.record(z.string(), z.number()).optional(),
+});
+
+export const chi2ConvRowSchema = z.object({
+  key: z.string(),
+  chi2: z.number(),
+  p_value: z.number(),
+  sig: z.boolean(),
+  conv_counts: z.record(z.string(), z.number()),
+  note: z.string().optional(),
+});
+
+export const friedmanWallTimeSchema = z.object({
+  chi2: z.number(),
+  p_friedman: z.number(),
+  sig: z.boolean(),
+  mean_ranks: z.record(z.string(), z.number().nullable()),
+  grand_means_ms: z.record(z.string(), z.number().nullable()),
+  speedup_vs_hygo: z.record(z.string(), z.number().nullable()),
+  fastest: z.string(),
+});
+
+export const marginRowSchema = z.object({
+  key: z.string(),
+  hyde_key: z.string(),
+  hyde_label: z.string(),
+  u_stat: z.number(),
+  p_value: z.number(),
+  sig: z.boolean(),
+  hyde_mean: z.number().nullable(),
+  hygo_mean: z.number().nullable(),
+  mean_diff: z.number().nullable(),
+  cliffs_delta: z.number().nullable(),
+  d_magnitude: z.string().nullable(),
+  bootstrap_ci_lo: z.number().nullable(),
+  bootstrap_ci_hi: z.number().nullable(),
+  direction: z.string().nullable(),
+  note: z.string().optional(),
+});
+
+export const scalingRowSchema = z.object({
+  fname: z.string(),
+  algo_key: z.string(),
+  algo_label: z.string(),
+  u_stat: z.number(),
+  p_value: z.number(),
+  sig: z.boolean(),
+  mean_2d: z.number().nullable(),
+  mean_25d: z.number().nullable(),
+  cv_2d: z.number().nullable(),
+  cv_25d: z.number().nullable(),
+  cliffs_delta: z.number().nullable(),
+  d_magnitude: z.string().nullable(),
+  degradation_ratio: z.number().nullable(),
+  direction: z.string().nullable(),
+  note: z.string().optional(),
+});
+
+export const analysisSummaryResponseSchema = z.object({
+  friedman_objective_error: friedmanObjectiveErrorSchema,
+  kruskal_per_scenario: z.array(kruskalRowSchema),
+  cochrans_q: cochransQSchema,
+  chi2_convergence: z.array(chi2ConvRowSchema),
+  friedman_wall_time: friedmanWallTimeSchema,
+  wall_time_kruskal: z.array(z.record(z.string(), z.unknown())),
+  margin_vs_hygo: z.array(marginRowSchema),
+  scaling: z.array(scalingRowSchema),
+});
+
+export type AnalysisSummary = z.infer<typeof analysisSummaryResponseSchema>;
+
 // -- CLI parity constants -------------------------------------------------------
 
 export const CLI_TEST_CASES: Array<{ fname: string; dim: number }> = [

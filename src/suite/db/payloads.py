@@ -30,3 +30,30 @@ def read_payload(path: Path) -> Any:
     """Read a zstd-compressed JSON payload written by :func:`write_payload`."""
     blob = path.read_bytes()
     return json.loads(zstd.ZstdDecompressor().decompress(blob))
+
+
+def resolve_scenario_payloads(
+    run_dir: Path,
+    scenario_results: list[dict],
+    scenario_key: str,
+) -> dict[str, Any]:
+    """Batch-read the payloads of every algorithm for one scenario key
+    (``<fname>_<dim>D``).
+
+    Paths are resolved against ``run_dir`` and rejected when they escape it,
+    mirroring the single-payload command's traversal protection.
+    """
+    run_dir = Path(run_dir).resolve()
+    payloads: dict[str, Any] = {}
+    for sr in scenario_results:
+        if f"{sr['fname']}_{sr['dim']}D" != scenario_key:
+            continue
+        path = (run_dir / sr["payloads_path"]).resolve()
+        if not path.is_relative_to(run_dir) or path.suffix != ".zst":
+            raise ValueError("invalid payload path")
+        if not path.exists():
+            raise FileNotFoundError(f"payload file not found: {path.name}")
+        payloads[sr["algo_key"]] = read_payload(path)
+    if not payloads:
+        raise ValueError(f"unknown scenario: {scenario_key}")
+    return payloads

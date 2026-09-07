@@ -28,6 +28,7 @@ from .schemas import (
     DeleteRunsResponse,
     DuplicateRunRequest,
     GetPayloadRequest,
+    GetScenarioPayloadsRequest,
     ListRunsRequest,
     ListRunsResponse,
     OkResponse,
@@ -345,23 +346,68 @@ async def get_payload(
 
 @commands.command()
 @_rl(0.1)
+async def get_scenario_payloads(
+    body: GetScenarioPayloadsRequest,
+    state: Annotated[AppState, State()],
+) -> dict[str, Any]:
+    """Return the payloads of all four algorithms for one scenario key.
+
+    Scenario keys look like ``ackley_2D``; the payloads path is resolved
+    against the run directory recorded in the database and rejected when it
+    escapes it.
+    """
+    import asyncio
+    import re
+    from pathlib import Path
+
+    from .db.payloads import resolve_scenario_payloads
+
+    if not re.fullmatch(r"\w+_\d+D", body.scenario_key):
+        raise InvokeException("invalid scenario key")
+    try:
+        detail = state.svc.get_run_detail(body.run_id)
+    except KeyError as exc:
+        raise _domain_error(exc) from exc
+    run_dir = Path(detail["output_dir"])
+    # zstd decompression is CPU-bound; keep the event loop responsive.
+    return await asyncio.to_thread(
+        resolve_scenario_payloads,
+        run_dir,
+        detail["scenario_results"],
+        body.scenario_key,
+    )
+
+
+@commands.command()
+@_rl(0.1)
 async def get_analysis(
     body: RunIdRequest,
     state: Annotated[AppState, State()],
 ) -> dict[str, Any]:
-    """Return analysis_summary.json (written by run_exports) for a run."""
+    """Return the statistical analysis snapshot backing the DOCX report.
+
+    Uses ``analysis_summary.json`` when a previous export wrote it, and
+    otherwise computes the same analyses on demand through the reference
+    functions, so the results detail view mirrors the exported report
+    without requiring an export first.
+    """
+    import asyncio
     from pathlib import Path
+
+    from .exports import compute_analysis_summary, load_results
 
     try:
         detail = state.svc.get_run_detail(body.run_id)
     except KeyError as exc:
         raise _domain_error(exc) from exc
-    path = Path(detail["output_dir"]) / "analysis_summary.json"
-    if not path.exists():
-        raise InvokeException(
-            "analysis_summary.json not found; run the exports first"
-        )
-    return json.loads(path.read_text(encoding="utf-8"))
+    run_dir = Path(detail["output_dir"])
+    cached = run_dir / "analysis_summary.json"
+    if cached.exists():
+        return json.loads(cached.read_text(encoding="utf-8"))
+    # scipy/bootstrap computations are CPU-bound; run them off the loop.
+    return await asyncio.to_thread(
+        compute_analysis_summary, load_results(run_dir)
+    )
 
 
 @commands.command()

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import * as echarts from "echarts";
-import { z } from "zod";
 import { toast } from "sonner";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -50,6 +49,7 @@ import {
   ALGO_COLORS,
   ALGO_KEYS,
   ALGO_LABELS,
+  analysisSummaryResponseSchema,
   deleteRunsResponseSchema,
   exportDoneEventSchema,
   exportErrorEventSchema,
@@ -57,16 +57,15 @@ import {
   okResponseSchema,
   scenarioPayloadsResponseSchema,
   type AlgoKey,
+  type AnalysisSummary,
   type RunDetailResponse,
   type ScenarioPayload,
 } from "@/lib/schemas";
 import { useSurface } from "@/hooks/useSurface";
 import Replay3D from "@/components/scene/Replay3D";
+import { AnalysesReport } from "@/components/results/AnalysesReport";
 import { pyInvokeValidated, subscribeValidated } from "@/lib/api";
 import { formatDuration, formatMs, formatSci } from "@/lib/formatters";
-
-const analysisSummarySchema = z.record(z.string(), z.unknown());
-type AnalysisSummary = Record<string, unknown>;
 
 const EXPORT_GROUPS = [
   { id: "csv", label: "CSV data" },
@@ -157,7 +156,7 @@ export default function RunDetail({
   }, [detail]);
 
   useEffect(() => {
-    pyInvokeValidated("get_analysis", analysisSummarySchema, {
+    pyInvokeValidated("get_analysis", analysisSummaryResponseSchema, {
       run_id: detail.id,
     })
       .then((a: AnalysisSummary) => setAnalysis(a))
@@ -533,10 +532,10 @@ export default function RunDetail({
         <CardContent>
           <Tabs defaultValue="convergence">
             <TabsList>
-              <TabsTrigger value="convergence">Convergence</TabsTrigger>
-              <TabsTrigger value="box">Final cost box plot</TabsTrigger>
+              <TabsTrigger value="convergence">Convergence curve</TabsTrigger>
+              <TabsTrigger value="box">Cost distribution</TabsTrigger>
               <TabsTrigger value="replay">3D replay</TabsTrigger>
-              <TabsTrigger value="analyses">Analyses</TabsTrigger>
+              <TabsTrigger value="analyses">Statistical analyses</TabsTrigger>
             </TabsList>
             <TabsContent value="convergence" className="space-y-2">
               {scenarioKeys.length > 1 && (
@@ -562,6 +561,13 @@ export default function RunDetail({
                 <p className="py-16 text-center text-sm text-muted-foreground">
                   Payloads not available.
                 </p>
+              )}
+              {scenarioKey && (
+                <BenchmarkSummaryTable
+                  rows={detail.scenario_results.filter(
+                    (r) => `${r.fname}_${r.dim}D` === scenarioKey,
+                  )}
+                />
               )}
             </TabsContent>
             <TabsContent value="box">
@@ -657,11 +663,15 @@ export default function RunDetail({
             </TabsContent>
             <TabsContent value="analyses">
               {analysis ? (
-                <AnalysisTables analysis={analysis} />
+                <AnalysesReport
+                  analysis={analysis}
+                  scenarioResults={detail.scenario_results}
+                  nRuns={detail.n_runs}
+                />
               ) : (
                 <p className="py-16 text-center text-sm text-muted-foreground">
-                  Statistical analyses appear here after running the exports for
-                  this run.
+                  Statistical analyses (report sections a-e) appear here once
+                  the run finishes.
                 </p>
               )}
             </TabsContent>
@@ -714,95 +724,66 @@ export default function RunDetail({
   );
 }
 
-function num(v: unknown): string {
-  return typeof v === "number" ? v.toPrecision(6) : String(v);
-}
+/**
+ * Per-benchmark summary statistics table, matching the DOCX report's
+ * Per-Benchmark Results table (Algorithm | Conv % | Mean Best | Std | CV |
+ * Mean Gen | Wall (ms)) for the selected scenario.
+ */
+function BenchmarkSummaryTable({
+  rows,
+}: {
+  rows: RunDetailResponse["scenario_results"];
+}) {
+  const ordered = ALGO_KEYS.map(
+    (ak) => [ak, rows.find((r) => r.algo_key === ak)] as const,
+  ).filter(([, r]) => r !== undefined);
 
-function KVTable({ entries }: { entries: Array<[string, unknown]> }) {
-  if (entries.length === 0) {
-    return <p className="text-sm text-muted-foreground">No data.</p>;
-  }
+  if (ordered.length === 0) return null;
+
   return (
     <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Algorithm</TableHead>
+          <TableHead className="text-right">Conv %</TableHead>
+          <TableHead className="text-right">Mean Best</TableHead>
+          <TableHead className="text-right">Std</TableHead>
+          <TableHead className="text-right">CV</TableHead>
+          <TableHead className="text-right">Mean Gen</TableHead>
+          <TableHead className="text-right">Wall (ms)</TableHead>
+        </TableRow>
+      </TableHeader>
       <TableBody>
-        {entries.map(([k, v]) => (
-          <TableRow key={k}>
-            <TableCell className="font-medium">{k}</TableCell>
+        {ordered.map(([ak, r]) => (
+          <TableRow key={ak}>
+            <TableCell>
+              <span
+                className="mr-2 inline-block h-2 w-2 rounded-full"
+                style={{ backgroundColor: ALGO_COLORS[ak] }}
+              />
+              {ALGO_LABELS[ak]}
+            </TableCell>
             <TableCell className="text-right font-mono text-xs">
-              {num(v)}
+              {r!.conv_pct.toFixed(1)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {r!.mean_best !== null ? r!.mean_best.toExponential(4) : "n/a"}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {r!.std_best !== null ? r!.std_best.toExponential(2) : "n/a"}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {r!.cv !== null ? r!.cv.toFixed(4) : "n/a"}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {r!.mean_conv_gen !== null ? r!.mean_conv_gen.toFixed(0) : "-"}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {r!.mean_wall_ms !== null ? r!.mean_wall_ms.toFixed(0) : "n/a"}
             </TableCell>
           </TableRow>
         ))}
       </TableBody>
     </Table>
-  );
-}
-
-function scalarEntries(obj: Record<string, unknown>): Array<[string, unknown]> {
-  return Object.entries(obj).filter(
-    ([, v]) => typeof v === "number" || typeof v === "string" || v === null,
-  );
-}
-
-function AnalysisTables({ analysis }: { analysis: AnalysisSummary }) {
-  const friedman = (analysis.friedman_objective_error ?? {}) as Record<
-    string,
-    unknown
-  >;
-  const cochran = (analysis.cochrans_q ?? {}) as Record<string, unknown>;
-  const wallTime = (analysis.friedman_wall_time ?? {}) as Record<
-    string,
-    unknown
-  >;
-  const margins = (analysis.margin_vs_hygo ?? []) as Array<
-    Record<string, unknown>
-  >;
-
-  return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <div>
-        <h3 className="mb-2 text-sm font-medium">
-          (a) Friedman objective error
-        </h3>
-        <KVTable entries={scalarEntries(friedman)} />
-      </div>
-      <div>
-        <h3 className="mb-2 text-sm font-medium">(b) Cochran Q</h3>
-        <KVTable entries={scalarEntries(cochran)} />
-      </div>
-      <div>
-        <h3 className="mb-2 text-sm font-medium">(c) Friedman wall time</h3>
-        <KVTable entries={scalarEntries(wallTime)} />
-      </div>
-      <div className="lg:col-span-3">
-        <h3 className="mb-2 text-sm font-medium">
-          (d) Margin vs HyGO (Wilcoxon + bootstrap CI)
-        </h3>
-        {margins.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No data.</p>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {Object.keys(margins[0]).map((k) => (
-                  <TableHead key={k}>{k}</TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {margins.map((row, i) => (
-                <TableRow key={i}>
-                  {Object.keys(margins[0]).map((k) => (
-                    <TableCell key={k} className="font-mono text-xs">
-                      {String(row[k])}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </div>
-    </div>
   );
 }
