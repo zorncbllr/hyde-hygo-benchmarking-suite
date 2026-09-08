@@ -39,6 +39,8 @@ from .schemas import (
     RunExportsRequest,
     RunIdRequest,
     SetTagsRequest,
+    SimulationRequest,
+    SimulationTraceResponse,
     StartBenchmarkRequest,
     StartBenchmarkResponse,
     SurfaceRequest,
@@ -108,6 +110,7 @@ async def ping(body: PingRequest) -> PongResponse:
     return PongResponse(message=f"pong: {body.payload}")
 
 
+
 # -- benchmark control --------------------------------------------------------
 
 
@@ -157,6 +160,37 @@ async def get_active_run(
     """Progress sync for late UI mounts (events emitted before subscription
     are lost; this returns the worker's authoritative counters)."""
     return ActiveRunResponse(**state.active_run_snapshot())
+
+
+# -- interactive simulation -----------------------------------------------------
+
+
+@commands.command()
+@_rl(0.5)
+async def run_simulation(
+    body: SimulationRequest,
+) -> SimulationTraceResponse:
+    """Run a small, traced simulation of one algorithm on a 2D scenario.
+
+    CPU-bound (sys.settrace instrumentation), so it executes off the event
+    loop. The trace is a compact integer payload; see suite.simulation.
+    """
+    import asyncio
+
+    from .simulation import SimulationError, run_simulation_trace
+
+    try:
+        trace = await asyncio.to_thread(
+            run_simulation_trace,
+            body.algo_key,
+            body.fname,
+            body.seed,
+            body.max_evals,
+            body.pop_size,
+        )
+    except SimulationError as exc:
+        raise _domain_error(exc) from exc
+    return SimulationTraceResponse(**trace)
 
 
 # -- 3D surface ---------------------------------------------------------------

@@ -26,13 +26,24 @@ The app has three pages:
   3D replay of recorded runs, statistical analyses, per-artifact exports
   (generated through the reference implementation's own functions) and run
   management (rename, duplicate, delete, open output directory).
-- **Simulation**: reserved for future interactive simulation features.
+- **Simulation**: interactive, pedagogical simulation of one algorithm at a
+  time. The Python backend runs the *real* vendored algorithm on a small 2D
+  scenario with a `sys.settrace` line tracer and returns a replayable
+  execution trace. The main panel plays the trace back over the 3D surface
+  (population, best-so-far trail, live convergence chart) with a narration
+  bar explaining the current conceptual step, a phase timeline, and
+  play/step/scrub controls (line-level or beat-level stepping). The right
+  panel shows the actual source of the algorithm with the currently executing
+  line highlighted, plus the class docstring ("design intent"). The four
+  algorithms (HyDE-bin, HyDE-qub, HyDE-con, HyGO) are switchable via tabs;
+  scenario (2D function), seed, evaluation budget and population size are
+  configurable, and a session outcome strip compares finished simulations.
 
 ## Layout
 
 ```
 src/hyde_bench/   vendored benchmark code (reference copy + progress_hook telemetry)
-src/suite/        pytauri app (commands, runner, exports, telemetry)
+src/suite/        pytauri app (commands, runner, exports, telemetry, simulation)
   suite/db/       SQLAlchemy models, run service (CRUD + batch), zstd payloads
   suite/app.py    pytauri wiring (only pytauri-dependent module)
 alembic/          migrations

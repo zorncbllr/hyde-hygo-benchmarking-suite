@@ -435,6 +435,81 @@ export const analysisSummaryResponseSchema = z.object({
 
 export type AnalysisSummary = z.infer<typeof analysisSummaryResponseSchema>;
 
+// -- Interactive simulation (mirror of src/suite/schemas.py) ----------------------
+
+export const simulationRequestSchema = z.object({
+  algo_key: z.enum(["hyde_bin", "hyde_qub", "hyde_con", "hygo"]),
+  fname: z.string().min(1),
+  seed: z.number().int().min(0),
+  max_evals: z.number().int().min(200).max(1000),
+  pop_size: z.number().int().min(8).max(30),
+});
+
+export type SimulationRequest = z.infer<typeof simulationRequestSchema>;
+
+export const simulationBeatSchema = z.object({
+  phase: z.string(),
+  title: z.string(),
+  body: z.string(),
+  start_line: z.number().int(),
+  end_line: z.number().int(),
+});
+
+export type SimulationBeat = z.infer<typeof simulationBeatSchema>;
+
+export const simSnapshotSchema = z.object({
+  kind: z.enum(["eval", "gen"]),
+  eval_count: z.number().int(),
+  best_cost: z.number(),
+  best_x: z.array(z.number()).nullable(),
+  phase: z.string().nullable(),
+  gen: z.number().int().nullable(),
+  positions: z.array(z.tuple([z.number(), z.number()])).nullable(),
+});
+
+export type SimSnapshot = z.infer<typeof simSnapshotSchema>;
+
+export const simulationResultSchema = z.object({
+  best_cost: z.number(),
+  best_x: z.array(z.number()).nullable(),
+  evals: z.number().int(),
+  conv_gen: z.number().int().nullable(),
+});
+
+export type SimulationResult = z.infer<typeof simulationResultSchema>;
+
+export const simulationEventsPayloadSchema = z.object({
+  func: z.string(),
+  line: z.string(),
+  eval_count: z.string(),
+  beat: z.string(),
+});
+
+export type SimulationEventsPayload = z.infer<
+  typeof simulationEventsPayloadSchema
+>;
+
+export const simulationTraceSchema = z.object({
+  algo_key: z.enum(["hyde_bin", "hyde_qub", "hyde_con", "hygo"]),
+  fname: z.string(),
+  dim: z.number().int(),
+  seed: z.number().int(),
+  max_evals: z.number().int(),
+  pop_size: z.number().int(),
+  lo: z.array(z.number()),
+  hi: z.array(z.number()),
+  source: z.string(),
+  func_names: z.array(z.string()),
+  n_events: z.number().int(),
+  events_payload: simulationEventsPayloadSchema,
+  beats: z.array(simulationBeatSchema),
+  snapshots: z.array(simSnapshotSchema),
+  result: simulationResultSchema,
+  truncated: z.boolean(),
+});
+
+export type SimulationTrace = z.infer<typeof simulationTraceSchema>;
+
 // -- CLI parity constants -------------------------------------------------------
 
 export const CLI_TEST_CASES: Array<{ fname: string; dim: number }> = [

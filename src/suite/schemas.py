@@ -152,6 +152,16 @@ class PathExistsRequest(BaseModel):
     path: str = Field(min_length=1)
 
 
+class SimulationRequest(BaseModel):
+    """Body for the interactive simulation command (2D scenarios only)."""
+
+    algo_key: Literal["hyde_bin", "hyde_qub", "hyde_con", "hygo"]
+    fname: str = Field(min_length=1, max_length=64)
+    seed: int = Field(default=0, ge=0)
+    max_evals: int = Field(default=400, ge=200, le=1000)
+    pop_size: int = Field(default=24, ge=8, le=30)
+
+
 class ActiveRunResponse(BaseModel):
     active: bool
     run_id: str | None = None
@@ -257,6 +267,62 @@ class DeleteRunsResponse(BaseModel):
 
 class CompareRunsResponse(BaseModel):
     data: dict
+
+
+# -- Simulation (interactive trace) --------------------------------------------
+
+
+class SimulationBeat(BaseModel):
+    phase: str
+    title: str
+    body: str
+    start_line: int
+    end_line: int
+
+
+class SimSnapshot(BaseModel):
+    kind: Literal["eval", "gen"]
+    eval_count: int
+    best_cost: float
+    best_x: list[float] | None = None
+    phase: str | None = None
+    gen: int | None = None
+    positions: list[list[float]] | None = None
+
+
+class SimulationEventsPayload(BaseModel):
+    """Delta+int16+zlib+base64 packed event streams (see suite.simulation)."""
+
+    func: str
+    line: str
+    eval_count: str
+    beat: str
+
+
+class SimulationResult(BaseModel):
+    best_cost: float
+    best_x: list[float] | None
+    evals: int
+    conv_gen: int | None
+
+
+class SimulationTraceResponse(BaseModel):
+    algo_key: str
+    fname: str
+    dim: int
+    seed: int
+    max_evals: int
+    pop_size: int
+    lo: list[float]
+    hi: list[float]
+    source: str
+    func_names: list[str]
+    n_events: int
+    events_payload: SimulationEventsPayload
+    beats: list[SimulationBeat]
+    snapshots: list[SimSnapshot]
+    result: SimulationResult
+    truncated: bool
 
 
 # -- Event payloads -----------------------------------------------------------

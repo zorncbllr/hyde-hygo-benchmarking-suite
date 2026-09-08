@@ -51,6 +51,7 @@ export function buildHeightField(
 export function applyFieldToGeometry(
   geo: THREE.PlaneGeometry,
   field: HeightField,
+  colorFn: (t: number) => THREE.Color = colormap,
 ): void {
   const pos = geo.attributes.position as THREE.BufferAttribute;
   const colors = new Float32Array(pos.count * 3);
@@ -59,7 +60,7 @@ export function applyFieldToGeometry(
       const idx = r * field.cols + c;
       const h = field.at(r, c);
       pos.setZ(idx, h);
-      const color = colormap(h);
+      const color = colorFn(h);
       colors[idx * 3] = color.r;
       colors[idx * 3 + 1] = color.g;
       colors[idx * 3 + 2] = color.b;
@@ -83,6 +84,33 @@ export function colormap(t: number): THREE.Color {
     [0.478, 0.821, 0.318],
     [0.741, 0.873, 0.15],
     [0.993, 0.906, 0.144],
+  ] as const;
+  const clamped = Math.min(1, Math.max(0, t));
+  const scaled = clamped * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(scaled));
+  const f = scaled - i;
+  const a = stops[i];
+  const b = stops[i + 1];
+  return new THREE.Color(
+    a[0] + f * (b[0] - a[0]),
+    a[1] + f * (b[1] - a[1]),
+    a[2] + f * (b[2] - a[2]),
+  );
+}
+
+/**
+ * Black-to-red ramp for the simulation terrain: black valleys, deep
+ * maroon midlands, saturated red peaks, with monotone lightness so depth
+ * reads like a shaded relief.
+ */
+export function colormapRedBlack(t: number): THREE.Color {
+  const stops = [
+    [0.03, 0.03, 0.04],
+    [0.18, 0.04, 0.06],
+    [0.4, 0.07, 0.09],
+    [0.66, 0.11, 0.13],
+    [0.86, 0.18, 0.16],
+    [1.0, 0.32, 0.24],
   ] as const;
   const clamped = Math.min(1, Math.max(0, t));
   const scaled = clamped * (stops.length - 1);

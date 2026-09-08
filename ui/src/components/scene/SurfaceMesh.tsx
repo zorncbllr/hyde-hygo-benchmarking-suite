@@ -1,11 +1,17 @@
 import { useMemo } from "react";
 import * as THREE from "three";
-import { applyFieldToGeometry, buildHeightField } from "./heightField";
+import {
+  applyFieldToGeometry,
+  buildHeightField,
+  colormapRedBlack,
+} from "./heightField";
 
 interface SurfaceMeshProps {
   zs: number[][];
   logScale: boolean;
   wireframe: boolean;
+  /** terrain palette; "rose" keeps overlays readable (default: viridis) */
+  palette?: "viridis" | "redblack";
 }
 
 /** Benchmark surface: unit plane displaced by normalized function heights. */
@@ -13,13 +19,18 @@ export default function SurfaceMesh({
   zs,
   logScale,
   wireframe,
+  palette = "viridis",
 }: SurfaceMeshProps) {
   const field = useMemo(() => buildHeightField(zs, logScale), [zs, logScale]);
 
   const geometry = useMemo(() => {
     if (!field) return null;
     const geo = new THREE.PlaneGeometry(1, 1, field.cols - 1, field.rows - 1);
-    applyFieldToGeometry(geo, field);
+    applyFieldToGeometry(
+      geo,
+      field,
+      palette === "redblack" ? colormapRedBlack : undefined,
+    );
     return geo;
   }, [field]);
 

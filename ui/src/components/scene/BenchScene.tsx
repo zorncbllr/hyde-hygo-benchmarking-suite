@@ -15,13 +15,20 @@ interface BenchSceneProps {
   trajectories: Record<string, Array<[number, number]>>;
   visible?: Record<AlgoKey, boolean>;
   heightAt: (xn: number, yn: number) => number;
+  /** point size in world units (default: compact) */
+  pointSize?: number;
+  /** trail line width in screen pixels (0 = plain 1px line) */
+  trailWidth?: number;
+  /** terrain palette for the surface mesh (default: viridis) */
+  palette?: "viridis" | "redblack";
   /** stats HUD rendered on top of the scene */
   overlay?: ReactNode;
 }
 
 /**
  * Shared 3D scene: benchmark surface + live/replay search overlay.
- * Used by the Scene3D workspace, the Live preview panel and dialogs.
+ * Used by the Scene3D workspace, the Live preview panel, dialogs and the
+ * Simulation page.
  */
 export default function BenchScene({
   surface,
@@ -31,6 +38,9 @@ export default function BenchScene({
   trajectories,
   visible,
   heightAt,
+  pointSize,
+  trailWidth,
+  palette,
   overlay,
 }: BenchSceneProps) {
   return (
@@ -50,6 +60,7 @@ export default function BenchScene({
             zs={surface.zs}
             logScale={logScale}
             wireframe={wireframe}
+            palette={palette}
           />
           <SearchPoints
             positions={positions}
@@ -63,6 +74,8 @@ export default function BenchScene({
               }
             }
             heightAt={heightAt}
+            pointSize={pointSize}
+            trailWidth={trailWidth}
           />
         </Center>
         <OrbitControls />
