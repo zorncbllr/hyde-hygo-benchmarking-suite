@@ -1,9 +1,55 @@
-import type { ReactNode } from "react";
-import { Canvas } from "@react-three/fiber";
+import { useEffect, type ReactNode } from "react";
+import { Canvas, useThree } from "@react-three/fiber";
 import { Center, OrbitControls } from "@react-three/drei";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import SurfaceMesh from "./SurfaceMesh";
 import SearchPoints from "./SearchPoints";
 import type { AlgoKey, SurfaceResponse } from "@/lib/schemas";
+
+/** Vertical pan clamp: keeps the orbit target around the surface band. */
+const TARGET_Y_MIN = -0.25;
+const TARGET_Y_MAX = 1.4;
+
+/**
+ * Shift + mouse wheel pans the camera and orbit target vertically instead
+ * of zooming: the zoom-in gesture (wheel up) moves the view down, the
+ * zoom-out gesture (wheel down) moves it up. The wheel event is intercepted
+ * in the capture phase on the canvas container, so OrbitControls never sees
+ * it and no zoom is applied.
+ */
+function ShiftWheelVerticalPan() {
+  const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  const invalidate = useThree((s) => s.invalidate);
+
+  useEffect(() => {
+    if (!controls) return;
+    // attach in the capture phase on the container: capture handlers on the
+    // parent run before the canvas listeners OrbitControls registered
+    const el = gl.domElement.parentElement ?? gl.domElement;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.shiftKey || e.defaultPrevented) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const dist = camera.position.distanceTo(controls.target);
+      const raw = controls.target.y - (e.deltaY / 100) * 0.08 * dist;
+      const y = Math.min(TARGET_Y_MAX, Math.max(TARGET_Y_MIN, raw));
+      const delta = y - controls.target.y;
+      if (delta === 0) return;
+      controls.target.y = y;
+      camera.position.y += delta;
+      controls.update();
+      invalidate();
+    };
+    el.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel, { capture: true });
+    };
+  }, [controls, camera, gl, invalidate]);
+
+  return null;
+}
 
 interface BenchSceneProps {
   surface: SurfaceResponse;
@@ -78,7 +124,8 @@ export default function BenchScene({
             trailWidth={trailWidth}
           />
         </Center>
-        <OrbitControls />
+        <OrbitControls makeDefault />
+        <ShiftWheelVerticalPan />
       </Canvas>
     </div>
   );
