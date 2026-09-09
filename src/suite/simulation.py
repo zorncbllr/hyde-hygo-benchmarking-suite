@@ -385,9 +385,7 @@ _BEATS_HYDE_QUB = [
     {
         "phase": "run",
         "title": "Phase 2 handoff",
-        "body": (
-            "The remaining 40% budget is handed to IPOP-CMA-ES."
-        ),
+        "body": ("The remaining 40% budget is handed to IPOP-CMA-ES."),
         "anchor": "self._cmaes(self.max_evals - self.eval_count)",
     },
 ]
@@ -445,10 +443,7 @@ _BEATS_HYDE_CON = [
     {
         "phase": "de",
         "title": "Greedy selection",
-        "body": (
-            "Children replace parents only when not worse; the population "
-            "never regresses."
-        ),
+        "body": ("Children replace parents only when not worse; the population never regresses."),
         "anchor": "better = child_f <= fitness[:n_ev]",
     },
     {
@@ -467,8 +462,7 @@ _BEATS_HYDE_CON = [
         "phase": "cmaes",
         "title": "CMA-ES warm-started from the archive",
         "body": (
-            "Phase 2 identical to the other variants: covariance seeded "
-            "from the archive scatter."
+            "Phase 2 identical to the other variants: covariance seeded from the archive scatter."
         ),
         "anchor": "C_warm = np.cov(arc_xs.T)",
     },
@@ -493,9 +487,7 @@ _BEATS_HYDE_CON = [
     {
         "phase": "cmaes",
         "title": "IPOP restart: double the population",
-        "body": (
-            "Restarts halve sigma and double lambda, up to 6 times."
-        ),
+        "body": ("Restarts halve sigma and double lambda, up to 6 times."),
         "anchor": "restart += 1",
     },
     {
@@ -510,17 +502,13 @@ _BEATS_HYDE_CON = [
     {
         "phase": "run",
         "title": "Stagnation counter",
-        "body": (
-            "Counts generations without meaningful best-cost improvement."
-        ),
+        "body": ("Counts generations without meaningful best-cost improvement."),
         "anchor": "if stag >= 3:",
     },
     {
         "phase": "run",
         "title": "Phase 2 handoff",
-        "body": (
-            "Remaining budget goes to IPOP-CMA-ES."
-        ),
+        "body": ("Remaining budget goes to IPOP-CMA-ES."),
         "anchor": "self._cmaes(self.max_evals - self.eval_count)",
     },
 ]
@@ -934,16 +922,18 @@ def run_simulation_trace(
         snapshots.append(
             {
                 "kind": "eval",
+                # trace event index at which this snapshot was taken; the
+                # frontend keys gen-snapshot lookups on it so intra-phase
+                # stages (LHS draw vs reorder vs evaluated pool) replay in
+                # exact code order even at equal eval counts
+                "event_idx": len(ev_func),
                 "eval_count": int(algo.eval_count),
                 "best_cost": float(algo.best_cost),
-                "best_x": (
-                    [float(best_x[0]), float(best_x[1])]
-                    if best_x is not None
-                    else None
-                ),
+                "best_x": ([float(best_x[0]), float(best_x[1])] if best_x is not None else None),
                 "phase": None,
                 "gen": None,
                 "positions": None,
+                "ops": None,
             }
         )
 
@@ -951,12 +941,14 @@ def run_simulation_trace(
         snapshots.append(
             {
                 "kind": "gen",
+                "event_idx": len(ev_func),
                 "eval_count": int(snap.get("eval_count", algo.eval_count)),
                 "best_cost": float(snap.get("best_cost", algo.best_cost)),
                 "best_x": snap.get("best_pos"),
                 "phase": snap.get("phase"),
                 "gen": snap.get("gen"),
                 "positions": snap.get("positions"),
+                "ops": snap.get("ops"),
             }
         )
 
@@ -974,10 +966,7 @@ def run_simulation_trace(
             # best_cost bookkeeping happens a line or two after the
             # increment; defer the snapshot until the cost is usable.
             pending_eval["v"] = True
-        elif (
-            pending_eval["v"]
-            and algo.best_cost < float("inf")
-        ):
+        elif pending_eval["v"] and algo.best_cost < float("inf"):
             pending_eval["v"] = False
             _record_eval_snapshot()
 

@@ -3,6 +3,7 @@ import {
   buildFrame,
   buildPhaseSegments,
   buildSnapshotIndex,
+  fastForwardIndex,
   nextBeatIndex,
   nextPhaseIndex,
   phaseColor,
@@ -10,9 +11,16 @@ import {
   prevBeatIndex,
   prevPhaseIndex,
   segmentAt,
+  type DecodedTrace,
   type SimOutcome,
 } from "@/lib/simulation";
-import { makeTrace } from "@/test/simTrace";
+import type { SimulationBeat } from "@/lib/schemas";
+import {
+  makeTrace,
+  mutationOps,
+  cmaesOps,
+  lhsSampleOps,
+} from "@/test/simTrace";
 
 describe("fixture decoded events", () => {
   it("carries the expected event streams", () => {
@@ -42,35 +50,71 @@ describe("buildSnapshotIndex", () => {
     expect(Array.from(snaps.genPosFilled)).toEqual([0, 1, 1]);
   });
 
+  it("forward-fills ops independently of positions", () => {
+    const snaps = buildSnapshotIndex(makeTrace().snapshots);
+    // gen 0 (init, lhs ops) -> gen 1 (de, mutation ops) -> gen 2 (cmaes, cmaes ops)
+    expect(Array.from(snaps.genOpsFilled)).toEqual([0, 1, 2]);
+    expect(snaps.genOps[0]).toEqual(lhsSampleOps);
+    expect(snaps.genOps[1]).toEqual(mutationOps);
+    expect(snaps.genOps[2]).toEqual(cmaesOps);
+  });
+
+  it("keys gen snapshots by trace event index, not eval count", () => {
+    const snaps = buildSnapshotIndex(makeTrace().snapshots);
+    // all three gen snapshots share eval counts 1/6/6 but their event
+    // indices (0/4/5) resolve stage-by-stage during playback
+    expect(Array.from(snaps.genKey)).toEqual([0, 4, 5]);
+    const d = makeTrace().decoded;
+    // event 3 is the first eval-6 event: the de generation has not
+    // emitted its snapshot yet (event 4), so the init pool still shows
+    const frame = buildFrame(
+      makeTrace(),
+      d,
+      buildSnapshotIndex(makeTrace().snapshots),
+      3,
+    );
+    expect(frame.positions).toEqual([
+      [0, 0],
+      [2, 2],
+    ]);
+    expect(frame.genNumber).toBe(0);
+  });
+
   it("drops out-of-order eval snapshots defensively", () => {
     const trace = makeTrace();
     trace.snapshots = [
       {
         kind: "eval",
+        event_idx: 0,
         eval_count: 3,
         best_cost: 4,
         best_x: null,
         phase: null,
         gen: null,
         positions: null,
+        ops: null,
       },
       {
         kind: "eval",
+        event_idx: 1,
         eval_count: 1,
         best_cost: 9,
         best_x: null,
         phase: null,
         gen: null,
         positions: null,
+        ops: null,
       },
       {
         kind: "eval",
+        event_idx: 2,
         eval_count: 5,
         best_cost: 2,
         best_x: null,
         phase: null,
         gen: null,
         positions: null,
+        ops: null,
       },
     ];
     const snaps = buildSnapshotIndex(trace.snapshots);
@@ -119,7 +163,19 @@ describe("buildFrame", () => {
     expect(frame.phase).toBeNull();
     expect(frame.bestCost).toBe(Number.POSITIVE_INFINITY);
     expect(frame.positions).toBeNull();
+    expect(frame.ops).toBeNull();
     expect(frame.evalCurve).toEqual([]);
+  });
+
+  it("exposes the operator overlay for the current step", () => {
+    const trace = makeTrace();
+    const d = trace.decoded;
+    const snaps = buildSnapshotIndex(trace.snapshots);
+    // event 5 sits in the population-less cmaes phase: positions come from
+    // the last generation while ops carry the live sampling distribution
+    const frame = buildFrame(trace, d, snaps, 5);
+    expect(frame.positions).toEqual([[1, 1]]);
+    expect(frame.ops).toEqual(cmaesOps);
   });
 });
 
@@ -200,10 +256,10 @@ describe("beat navigation", () => {
     const trace = makeTrace();
     const d = trace.decoded;
     const snaps = buildSnapshotIndex(trace.snapshots);
-    // event 3: eval 6 -> last completed gen is "de" gen 2
-    const frame = buildFrame(trace, d, snaps, 3);
+    // event 4+: the "de" gen-2 snapshot has been emitted -> its population
+    // shows, with the init pool as the movement source
+    const frame = buildFrame(trace, d, snaps, 4);
     expect(frame.positions).toEqual([[1, 1]]);
-    // movement source: the previous generation's population
     expect(frame.prevPositions).toEqual([
       [0, 0],
       [2, 2],
@@ -231,6 +287,44 @@ describe("phase labels and colors", () => {
     expect(phaseColor("de")).toMatch(/^#/);
     expect(phaseColor(null)).toBe("#a1a1aa");
     expect(phaseColor("mystery")).toBe("#a1a1aa");
+  });
+});
+
+describe("fast-forward through encode/decode stretches", () => {
+  const beats: SimulationBeat[] = [
+    {
+      phase: "encode",
+      title: "Encode",
+      body: "b",
+      start_line: 1,
+      end_line: 10,
+    },
+    { phase: "de", title: "DE", body: "b", start_line: 11, end_line: 20 },
+  ];
+  const mk = (beatIdxs: number[]): DecodedTrace => ({
+    n: beatIdxs.length,
+    funcIdx: Int32Array.from(Array(beatIdxs.length).fill(0)),
+    linenos: Int32Array.from(Array(beatIdxs.length).fill(1)),
+    evalCounts: Int32Array.from(Array(beatIdxs.length).fill(1)),
+    beatIdxs: Int32Array.from(beatIdxs),
+  });
+
+  it("skips an entire contiguous encode run in one step", () => {
+    const d = mk([0, 0, 0, 1, 0, 0, 1]);
+    expect(fastForwardIndex(d, beats, 0)).toBe(3);
+    expect(fastForwardIndex(d, beats, 1)).toBe(3);
+  });
+
+  it("leaves non-encode positions unchanged", () => {
+    const d = mk([0, 0, 1, 1, 0]);
+    expect(fastForwardIndex(d, beats, 2)).toBe(2);
+    expect(fastForwardIndex(d, beats, 4)).toBe(4); // de event
+  });
+
+  it("stops before untraced events and clamps at the last event", () => {
+    const d = mk([0, 0, -1, 0]);
+    expect(fastForwardIndex(d, beats, 0)).toBe(2);
+    expect(fastForwardIndex(d, beats, 3)).toBe(3);
   });
 });
 

@@ -43,12 +43,16 @@ class HyDEBin:
         self._arc = []
         self._arc_max = max(dim + 2, 30)
         self.progress_hook = progress_hook
+        self._pending_ops = None
 
-    def _emit_progress(self, phase, gen, positions=None):
+    def _emit_progress(self, phase, gen, positions=None, ops=None):
         """Emit a read-only snapshot to the progress hook, if installed.
 
         Never mutates algorithm state and does not touch the RNG, so runs
         with ``progress_hook=None`` are byte-identical to uninstrumented code.
+        ``ops`` carries operator-level geometry (decision space) for the
+        simulation visualizer; it is only populated when the hook is set
+        and ``dim == 2``.
         """
         hook = self.progress_hook
         if hook is None:
@@ -71,7 +75,12 @@ class HyDEBin:
             snap['positions'] = [[float(px), float(py)] for px, py in p]
         else:
             snap['positions'] = None
+        snap['ops'] = ops
         hook(snap)
+
+    def _pt(self, x):
+        """2D point as plain floats for the ops payload."""
+        return [float(x[0]), float(x[1])]
 
     # -- Encoding -----------------------------------------------------------
 
@@ -124,14 +133,33 @@ class HyDEBin:
             perm = self.rng.permutation(N)
             samples[:, d] = self.lo[d] + (perm + self.rng.random(N)) / N * self.width[d]
 
+        if self.progress_hook is not None and self.dim == 2:
+            self._emit_progress('init', 0, samples, {
+                'type': 'lhs', 'strata': N, 'reorder': N > 4, 'stage': 'sample',
+            })
+
         # Farthest-point reordering
         if N > 4:
             sel = [0]
             dists = np.full(N, np.inf)
-            for _ in range(N - 1):
+            for step in range(N - 1):
                 d2 = np.sum((samples - samples[sel[-1]]) ** 2, axis=1)
                 dists = np.minimum(dists, d2)
                 sel.append(int(np.argmax(dists)))
+                if self.progress_hook is not None and self.dim == 2:
+                    # One snapshot per greedy step: the full pool in
+                    # original order, the visit sequence so far and each
+                    # sample's min-distance to the selected set.
+                    self._emit_progress('init', 0, samples, {
+                        'type': 'lhs',
+                        'strata': N,
+                        'reorder': True,
+                        'stage': 'reorder',
+                        'step': int(step + 1),
+                        'order': [int(i) for i in sel],
+                        'dists': [float(d) for d in dists],
+                        'last': int(sel[-1]),
+                    })
             samples = samples[sel]
 
         # Encode to binary
@@ -164,6 +192,13 @@ class HyDEBin:
                         + F[:, None] * (pop_x[r1] - pop_x[r2])
         mutants = np.clip(mutants, self.lo, self.hi)
 
+        trace_ops = self.progress_hook is not None and self.dim == 2
+        if trace_ops:
+            # capture the exact inputs the mutation used; selection below
+            # replaces population rows in-place
+            pre_pop = pop_x.copy()
+            de_best = best_x.copy()
+
         # Binomial crossover
         mask = self.rng.random((N, dim)) < cr
         mask[np.arange(N), self.rng.integers(0, dim, N)] = True
@@ -181,6 +216,26 @@ class HyDEBin:
                 fitness[i] = child_f[i]
                 chroms[i] = self._encode(children_x[i])
 
+        if trace_ops:
+            # Full operator chain for a few individuals spread across the
+            # population: mutation inputs, crossover child, selection.
+            idxs = np.linspace(0, n_ev - 1, min(6, n_ev)).astype(int)
+            self._pending_ops = {
+                'type': 'mutation',
+                'samples': [
+                    {
+                        'x': self._pt(pre_pop[i]),
+                        'best': self._pt(de_best),
+                        'r1': self._pt(pre_pop[r1[i]]),
+                        'r2': self._pt(pre_pop[r2[i]]),
+                        'f': float(F[i]),
+                        'child': self._pt(children_x[i]),
+                        'accepted': bool(better[i]),
+                    }
+                    for i in idxs
+                ],
+            }
+
         return chroms, pop_x, fitness
 
     # -- Stagnation recovery: random bit-flip perturbation ------------------
@@ -190,6 +245,9 @@ class HyDEBin:
         n_t = max(1, N // 2)
         worst = np.argsort(fitness)[-n_t:]
 
+        trace_ops = self.progress_hook is not None and self.dim == 2
+        before = pop_x[worst].copy() if trace_ops else None
+
         for idx in worst:
             c = chroms[idx].copy()
             # Flip random bits (expected ~1 bit per parameter)
@@ -198,6 +256,15 @@ class HyDEBin:
                 c[bit_idx] ^= 1
             chroms[idx] = c
             pop_x[idx] = self._decode(c)
+
+        if trace_ops:
+            self._pending_ops = {
+                'type': 'bitflip',
+                'moves': [
+                    {'from': self._pt(b), 'to': self._pt(a)}
+                    for b, a in zip(before, pop_x[worst])
+                ],
+            }
 
         n_ev = min(n_t, self.max_evals - self.eval_count)
         if n_ev > 0:
@@ -288,6 +355,26 @@ class HyDEBin:
                 sig *= np.exp((cs / ds) * (np.linalg.norm(ps) / chi - 1))
                 sig = float(np.clip(sig, 1e-12, np.max(self.width)))
 
+                if self.progress_hook is not None and self.dim == 2:
+                    # Live sampling distribution: mean + covariance axes
+                    # (1-sigma ellipse basis = sigma * B_k * D_k), the
+                    # mean shift and the best-mu rank selection flags
+                    # (aligned with the offspring positions).
+                    sel_flags = [False] * len(X)
+                    for k in range(mu):
+                        sel_flags[int(order[k])] = True
+                    self._emit_progress('cmaes', None, X, {
+                        'type': 'cmaes',
+                        'mean': self._pt(mean),
+                        'mean_old': self._pt(mean_old),
+                        'axes': [
+                            self._pt(B[:, k] * D[k] * sig) for k in range(dim)
+                        ],
+                        'sigma': float(sig),
+                        'restart': int(restart),
+                        'sel_flags': sel_flags,
+                    })
+
                 if sig < 1e-11 or not np.isfinite(sig) \
                         or not np.all(np.isfinite(C)):
                     break
@@ -305,7 +392,12 @@ class HyDEBin:
 
         chroms, pop_x, fitness = self._init_pop(N)
         self.gen_best.append(self.best_cost)
-        self._emit_progress('init', 0, pop_x)
+        self._emit_progress('init', 0, pop_x, {
+            'type': 'lhs',
+            'strata': N,
+            'reorder': N > 4,
+            'stage': 'final',
+        })
 
         stag = 0
         prev_best = self.best_cost
@@ -315,6 +407,8 @@ class HyDEBin:
                 break
 
             chroms, pop_x, fitness = self._de_gen(chroms, pop_x, fitness)
+            de_ops = self._pending_ops
+            self._pending_ops = None
             if self.eval_count >= self.max_evals:
                 break
 
@@ -326,17 +420,21 @@ class HyDEBin:
             if stag >= 3:
                 chroms, pop_x, fitness = self._recover(chroms, pop_x, fitness)
                 stag = 0
+                if self._pending_ops is not None:
+                    self._emit_progress('recover', g, pop_x, self._pending_ops)
+                    self._pending_ops = None
                 if self.eval_count >= self.max_evals:
                     break
 
             self.gen_best.append(self.best_cost)
-            self._emit_progress('de', g, pop_x)
+            self._emit_progress('de', g, pop_x, de_ops)
             if conv_gen is None and converged(self.fname, self.best_cost, self.dim):
                 conv_gen = g
 
         if self.eval_count < self.max_evals and self._arc:
             self._cmaes(self.max_evals - self.eval_count)
             self.gen_best.append(self.best_cost)
+            self._pending_ops = None
             self._emit_progress('cmaes', None, None)
 
         while len(self.gen_best) <= self.max_gen:

@@ -52,15 +52,19 @@ class HyDEQub:
         self._arc     = []
         self._arc_max = max(dim + 2, 30)
         self.progress_hook = progress_hook
+        self._pending_ops = None
 
     # ── Progress telemetry (read-only) ───────────────────────────────
 
-    def _emit_progress(self, phase, gen, theta=None):
+    def _emit_progress(self, phase, gen, theta=None, ops=None):
         """Emit a read-only snapshot to the progress hook, if installed.
 
         Never mutates algorithm state and does not touch the RNG, so runs
         with ``progress_hook=None`` are byte-identical to uninstrumented code.
         Positions are reported in decision space via ``_observe``.
+        ``ops`` carries operator-level geometry (decision space) for the
+        simulation visualizer; it is only populated when the hook is set
+        and ``dim == 2``.
         """
         hook = self.progress_hook
         if hook is None:
@@ -83,7 +87,13 @@ class HyDEQub:
             snap['positions'] = [[float(px), float(py)] for px, py in p]
         else:
             snap['positions'] = None
+        snap['ops'] = ops
         hook(snap)
+
+    def _pt(self, theta):
+        """Observed 2D point (decision space) as plain floats."""
+        x = self._observe(np.asarray(theta, dtype=float))
+        return [float(x[0]), float(x[1])]
 
     # ── Evaluation ───────────────────────────────────────────────────
 
@@ -117,13 +127,32 @@ class HyDEQub:
         for d in range(self.dim):
             perm = self.rng.permutation(N)
             theta[:, d] = (perm + self.rng.random(N)) / N * (np.pi / 2)
+
+        if self.progress_hook is not None and self.dim == 2:
+            self._emit_progress('init', 0, theta, {
+                'type': 'lhs', 'strata': N, 'reorder': N > 4,
+                'qubit': True, 'stage': 'sample',
+            })
+
         if N > 4:
             sel   = [0]
             dists = np.full(N, np.inf)
-            for _ in range(N - 1):
+            for step in range(N - 1):
                 d2    = np.sum((theta - theta[sel[-1]]) ** 2, axis=1)
                 dists = np.minimum(dists, d2)
                 sel.append(int(np.argmax(dists)))
+                if self.progress_hook is not None and self.dim == 2:
+                    self._emit_progress('init', 0, theta, {
+                        'type': 'lhs',
+                        'strata': N,
+                        'reorder': True,
+                        'qubit': True,
+                        'stage': 'reorder',
+                        'step': int(step + 1),
+                        'order': [int(i) for i in sel],
+                        'dists': [float(d) for d in dists],
+                        'last': int(sel[-1]),
+                    })
             theta = theta[sel]
         return theta, self._eval_pop(self._observe(theta))
 
@@ -148,6 +177,11 @@ class HyDEQub:
                         + F[:, None] * (theta[r1] - theta[r2])
         mutants = np.clip(mutants, 0, np.pi / 2)
 
+        trace_ops = self.progress_hook is not None and self.dim == 2
+        if trace_ops:
+            pre_theta = theta.copy()
+            de_best_t = best_t.copy()
+
         mask = self.rng.random((N, dim)) < cr
         mask[np.arange(N), self.rng.integers(0, dim, N)] = True
         children_t = np.where(mask, mutants, theta)
@@ -161,6 +195,24 @@ class HyDEQub:
         better  = child_f <= fitness[:n_ev]
         theta[:n_ev]   = np.where(better[:, None], children_t[:n_ev], theta[:n_ev])
         fitness[:n_ev] = np.where(better, child_f, fitness[:n_ev])
+
+        if trace_ops:
+            idxs = np.linspace(0, n_ev - 1, min(6, n_ev)).astype(int)
+            self._pending_ops = {
+                'type': 'mutation',
+                'samples': [
+                    {
+                        'x': self._pt(pre_theta[i]),
+                        'best': self._pt(de_best_t),
+                        'r1': self._pt(pre_theta[r1[i]]),
+                        'r2': self._pt(pre_theta[r2[i]]),
+                        'f': float(F[i]),
+                        'child': self._pt(children_t[i]),
+                        'accepted': bool(better[i]),
+                    }
+                    for i in idxs
+                ],
+            }
         return theta, fitness
 
     # ── Quantum tunneling ────────────────────────────────────────────
@@ -171,11 +223,27 @@ class HyDEQub:
         worst     = np.argsort(fitness)[-n_t:]
         strengths = np.linspace(0.2, 1.0, n_t)
 
+        trace_ops = self.progress_hook is not None and self.dim == 2
+        before    = theta[worst].copy() if trace_ops else None
+
         for k, idx in enumerate(worst):
             s = strengths[k]
             theta[idx] = (1 - s) * theta[idx] + s * (np.pi / 2 - theta[idx])
             theta[idx] += 0.02 * self.rng.standard_normal(self.dim)
             theta[idx]  = np.clip(theta[idx], 0, np.pi / 2)
+
+        if trace_ops:
+            self._pending_ops = {
+                'type': 'tunnel',
+                'moves': [
+                    {
+                        'from': self._pt(b),
+                        'to': self._pt(a),
+                        's': float(s),
+                    }
+                    for b, a, s in zip(before, theta[worst], strengths)
+                ],
+            }
 
         tunneled_x = self._observe(theta[worst])
         n_ev = min(n_t, self.max_evals - self.eval_count)
@@ -266,6 +334,25 @@ class HyDEQub:
                 sig   *= np.exp((cs / ds) * (np.linalg.norm(ps) / chi - 1))
                 sig    = float(np.clip(sig, 1e-12, np.max(self.width)))
 
+                if self.progress_hook is not None and self.dim == 2:
+                    # CMA-ES runs in decision space; no observation here.
+                    sel_flags = [False] * len(X)
+                    for k in range(mu):
+                        sel_flags[int(order[k])] = True
+                    self._emit_progress('cmaes', None, X, {
+                        'type': 'cmaes',
+                        'mean': [float(mean[0]), float(mean[1])],
+                        'mean_old': [float(mean_old[0]), float(mean_old[1])],
+                        'axes': [
+                            [float(B[0, k] * D[k] * sig),
+                             float(B[1, k] * D[k] * sig)]
+                            for k in range(dim)
+                        ],
+                        'sigma': float(sig),
+                        'restart': int(restart),
+                        'sel_flags': sel_flags,
+                    })
+
                 if sig < 1e-11 or not np.isfinite(sig) \
                         or not np.all(np.isfinite(C)):
                     break
@@ -283,7 +370,13 @@ class HyDEQub:
 
         theta, fitness = self._init_pop(N)
         self.gen_best.append(self.best_cost)
-        self._emit_progress('init', 0, theta)
+        self._emit_progress('init', 0, theta, {
+            'type': 'lhs',
+            'strata': N,
+            'reorder': N > 4,
+            'qubit': True,
+            'stage': 'final',
+        })
 
         stag      = 0
         prev_best = self.best_cost
@@ -293,6 +386,8 @@ class HyDEQub:
                 break
 
             theta, fitness = self._de_gen(theta, fitness)
+            de_ops = self._pending_ops
+            self._pending_ops = None
             if self.eval_count >= self.max_evals:
                 break
 
@@ -304,17 +399,21 @@ class HyDEQub:
             if stag >= 3:
                 theta, fitness = self._tunnel(theta, fitness)
                 stag = 0
+                if self._pending_ops is not None:
+                    self._emit_progress('tunnel', g, theta, self._pending_ops)
+                    self._pending_ops = None
                 if self.eval_count >= self.max_evals:
                     break
 
             self.gen_best.append(self.best_cost)
-            self._emit_progress('de', g, theta)
+            self._emit_progress('de', g, theta, de_ops)
             if conv_gen is None and converged(self.fname, self.best_cost, self.dim):
                 conv_gen = g
 
         if self.eval_count < self.max_evals and self._arc:
             self._cmaes(self.max_evals - self.eval_count)
             self.gen_best.append(self.best_cost)
+            self._pending_ops = None
             self._emit_progress('cmaes', None, None)
 
         while len(self.gen_best) <= self.max_gen:

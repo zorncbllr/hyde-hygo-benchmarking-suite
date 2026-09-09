@@ -12,6 +12,7 @@ import {
   ALGO_COLORS,
   ALGO_LABELS,
   type AlgoKey,
+  type SimOps,
   type SurfaceResponse,
 } from "@/lib/schemas";
 import { formatSci } from "@/lib/formatters";
@@ -30,6 +31,8 @@ interface SimSceneProps {
   maximized?: boolean;
   /** when provided, renders a maximize/minimize toggle in the scene toolbar */
   onToggleMaximize?: () => void;
+  /** playback reached the last event: highlight the best returned result */
+  atEnd?: boolean;
 }
 
 /**
@@ -45,6 +48,7 @@ export default function SimScene({
   onViewChange,
   maximized = false,
   onToggleMaximize,
+  atEnd = false,
 }: SimSceneProps) {
   const [localView, setLocalView] = useState<SimSceneView>("map");
   const view = viewProp ?? localView;
@@ -92,6 +96,8 @@ export default function SimScene({
           prevPositions={frame.prevPositions}
           trail={frame.trail}
           bestX={frame.bestX}
+          ops={frame.ops}
+          highlightResult={atEnd}
         />
       ) : (
         <BenchScene
@@ -110,7 +116,7 @@ export default function SimScene({
         rows={statRows}
         caption={`${phaseLabel(frame.phase)} - best cost`}
       />
-      <div className="absolute bottom-2 left-2 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-background/80 px-2 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur">
+      <div className="absolute bottom-2 left-2 z-10 flex max-w-[70%] flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-background/80 px-2 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur">
         <span className="flex items-center gap-1">
           <svg width="14" height="8" aria-hidden>
             <line
@@ -118,10 +124,10 @@ export default function SimScene({
               y1="4"
               x2="10"
               y2="4"
-              stroke={ALGO_COLORS[algoKey]}
+              stroke="#ffffff"
               strokeWidth="2"
             />
-            <path d="M10 1 L14 4 L10 7 Z" fill={ALGO_COLORS[algoKey]} />
+            <path d="M10 1 L14 4 L10 7 Z" fill="#ffffff" />
           </svg>
           individual moved this generation
         </span>
@@ -132,7 +138,7 @@ export default function SimScene({
               y1="4"
               x2="13"
               y2="4"
-              stroke="#f4f4f5"
+              stroke={ALGO_COLORS[algoKey]}
               strokeWidth="2"
             />
           </svg>
@@ -151,6 +157,7 @@ export default function SimScene({
           </svg>
           current best
         </span>
+        {frame.ops && <OpLegend ops={frame.ops} />}
       </div>
       <div className="absolute top-2 right-2 z-10 flex items-start gap-1.5">
         <div className="flex overflow-hidden rounded-md border bg-background/80 p-0.5 shadow-sm backdrop-blur">
@@ -210,5 +217,51 @@ export default function SimScene({
         )}
       </div>
     </div>
+  );
+}
+
+/** Legend line for the operator overlay currently on the map. */
+function OpLegend({ ops }: { ops: SimOps }) {
+  let text: string;
+  switch (ops.type) {
+    case "lhs": {
+      const parts = ["LHS strata: one sample per row/column (shaded cells)"];
+      if (ops.qubit) parts.push("sin^2-warped strata (sampled in theta)");
+      if (ops.reorder && ops.stage === "reorder")
+        parts.push(
+          "reorder: bright = far from selected (picked next), ring = next pick, numbers = visit order",
+        );
+      else if (ops.reorder && ops.stage === "final")
+        parts.push("numbers = farthest-point visit order");
+      text = parts.join(" - ");
+      break;
+    }
+    case "mutation":
+      text =
+        "DE: dashed = pull to best, dotted = r1-r2, solid = mutation step; dot = crossover child (green accepted / rose rejected)";
+      break;
+    case "bitflip":
+      text = "recovery: random bit-flip jumps (worst half)";
+      break;
+    case "gauss":
+      text = "recovery: adaptive Gaussian kicks (worst half)";
+      break;
+    case "tunnel":
+      text = "tunneling: reflection through the bounds center";
+      break;
+    case "cmaes":
+      text = "CMA-ES sampling distribution (1-sigma / 2-sigma)";
+      break;
+    case "ga":
+      text = "GA: parent -> child links (color = operator)";
+      break;
+    case "dsm":
+      text = "DSM: simplex, centroid c, active move";
+      break;
+  }
+  return (
+    <span className="font-medium text-foreground/80" data-testid="op-legend">
+      {text}
+    </span>
   );
 }

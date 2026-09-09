@@ -6,7 +6,7 @@ free of pytauri imports so it can be unit-tested standalone.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -89,9 +89,7 @@ class ListRunsRequest(BaseModel):
     status: str | None = None
     tag: str | None = None
     search: str | None = None
-    sort: Literal["created_at", "label", "duration_s", "status", "n_runs"] = (
-        "created_at"
-    )
+    sort: Literal["created_at", "label", "duration_s", "status", "n_runs"] = "created_at"
     order: Literal["asc", "desc"] = "desc"
     page: int = Field(default=1, ge=1)
     per_page: int = Field(default=20, ge=1, le=100)
@@ -143,9 +141,7 @@ class CompareRunsRequest(BaseModel):
 
 class RunExportsRequest(BaseModel):
     run_id: str = Field(min_length=1)
-    groups: list[str] = Field(
-        default_factory=lambda: ["csv", "charts", "docx", "json"]
-    )
+    groups: list[str] = Field(default_factory=lambda: ["csv", "charts", "docx", "json"])
 
 
 class PathExistsRequest(BaseModel):
@@ -282,12 +278,19 @@ class SimulationBeat(BaseModel):
 
 class SimSnapshot(BaseModel):
     kind: Literal["eval", "gen"]
+    # trace event index at emission time; the frontend keys gen-snapshot
+    # lookups on it so intra-phase stages replay in exact code order
+    event_idx: int = Field(ge=0)
     eval_count: int
     best_cost: float
     best_x: list[float] | None = None
     phase: str | None = None
     gen: int | None = None
     positions: list[list[float]] | None = None
+    # Operator-level geometry for the simulation visualizer (decision
+    # space); shape depends on the algorithm phase and mirrors the zod
+    # simOpsSchema discriminated union on the frontend.
+    ops: dict[str, Any] | None = None
 
 
 class SimulationEventsPayload(BaseModel):

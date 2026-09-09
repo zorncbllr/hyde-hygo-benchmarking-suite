@@ -1,6 +1,42 @@
-import type { SimulationTrace } from "@/lib/schemas";
+import type { SimulationTrace, SimOps } from "@/lib/schemas";
 import type { DecodedTrace } from "@/lib/simulation";
 import type { SimulationTraceLoaded } from "@/lib/simTraceCodec";
+
+/** Mutation ops attached to the "de" gen snapshot. */
+export const mutationOps: SimOps = {
+  type: "mutation",
+  samples: [
+    {
+      x: [1, 1],
+      best: [0, 0],
+      r1: [2, 0],
+      r2: [0, 2],
+      f: 0.6,
+      child: [0.5, 0.5],
+      accepted: true,
+    },
+  ],
+};
+
+/** CMA-ES distribution ops attached to the population-less cmaes snapshot. */
+export const cmaesOps: SimOps = {
+  type: "cmaes",
+  mean: [0, 0],
+  axes: [
+    [1, 0],
+    [0, 1],
+  ],
+  sigma: 0.5,
+  restart: 0,
+};
+
+/** LHS init ops: raw draw before farthest-point reordering. */
+export const lhsSampleOps: SimOps = {
+  type: "lhs",
+  strata: 2,
+  reorder: true,
+  stage: "sample",
+};
 
 /**
  * Builds a small but structurally realistic loaded simulation trace for
@@ -63,15 +99,18 @@ export function makeTrace(
     snapshots: [
       {
         kind: "eval",
+        event_idx: 0,
         eval_count: 1,
         best_cost: 10,
         best_x: [1, 2],
         phase: null,
         gen: null,
         positions: null,
+        ops: null,
       },
       {
         kind: "gen",
+        event_idx: 0,
         eval_count: 1,
         best_cost: 10,
         best_x: [1, 2],
@@ -81,44 +120,54 @@ export function makeTrace(
           [0, 0],
           [2, 2],
         ],
+        ops: lhsSampleOps,
       },
       {
         kind: "eval",
+        event_idx: 1,
         eval_count: 3,
         best_cost: 4,
         best_x: [0, 1],
         phase: null,
         gen: null,
         positions: null,
+        ops: null,
       },
       {
         kind: "eval",
+        event_idx: 2,
         eval_count: 5,
         best_cost: 2,
         best_x: [-1, 0],
         phase: null,
         gen: null,
         positions: null,
+        ops: null,
       },
       {
         kind: "gen",
+        event_idx: 4,
         eval_count: 6,
         best_cost: 1,
         best_x: [0, 0],
         phase: "de",
         gen: 2,
         positions: [[1, 1]],
+        ops: mutationOps,
       },
       {
         // phase that emits no population (e.g. CMA-ES); positions must
-        // forward-fill to the previous generation
+        // forward-fill to the previous generation while ops carry the
+        // live sampling distribution
         kind: "gen",
+        event_idx: 5,
         eval_count: 6,
         best_cost: 1,
         best_x: [0, 0],
         phase: "cmaes",
         gen: null,
         positions: null,
+        ops: cmaesOps,
       },
     ],
     result: { best_cost: 1, best_x: [0, 0], evals: 6, conv_gen: 2 },

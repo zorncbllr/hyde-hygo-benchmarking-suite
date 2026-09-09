@@ -283,6 +283,7 @@ export default function SimulationView() {
                   onViewChange={setSceneView}
                   maximized={maximized}
                   onToggleMaximize={toggleMaximize}
+                  atEnd={player.idx >= player.total - 1}
                 />
               ) : loading ? (
                 <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -380,6 +381,7 @@ export default function SimulationView() {
                     onViewChange={setSceneView}
                     maximized
                     onToggleMaximize={toggleMaximize}
+                    atEnd={player.idx >= player.total - 1}
                   />
                 </div>
                 <SimControls player={player} />

@@ -66,11 +66,14 @@ class HyGO:
         self.gen_best     = []   # best cost recorded after each stage
         self.progress_hook = progress_hook
 
-    def _emit_progress(self, phase, gen, positions=None):
+    def _emit_progress(self, phase, gen, positions=None, ops=None):
         """Emit a read-only snapshot to the progress hook, if installed.
 
         Never mutates algorithm state and does not touch the RNG, so runs
         with ``progress_hook=None`` are byte-identical to uninstrumented code.
+        ``ops`` carries operator-level geometry (decision space) for the
+        simulation visualizer; it is only populated when the hook is set
+        and ``dim == 2``.
         """
         hook = self.progress_hook
         if hook is None:
@@ -93,7 +96,12 @@ class HyGO:
             snap['positions'] = [[float(px), float(py)] for px, py in p]
         else:
             snap['positions'] = None
+        snap['ops'] = ops
         hook(snap)
+
+    def _pt(self, x):
+        """2D point as plain floats for the ops payload."""
+        return [float(x[0]), float(x[1])]
 
 
     # ── Latin Hypercube Sampling ──────────────────────────────────────────────
@@ -192,6 +200,7 @@ class HyGO:
         sx = [x.copy() for x in simplex_x]
         sc = list(simplex_costs)
 
+        trace_ops = self.progress_hook is not None and self.dim == 2
         new_individuals    = []
         attempts_no_change = 0
 
@@ -212,6 +221,11 @@ class HyGO:
             J_best         = sc[0]
             J_second_worst = sc[-2]
 
+            if trace_ops:
+                simplex_pts = [self._pt(p) for p in sx]
+                centroid_pt = self._pt(c)
+                moves       = []
+
             improved = False
 
             # Reflection
@@ -219,6 +233,9 @@ class HyGO:
             Jr = self.evaluate(xr)
             new_individuals.append((xr, Jr))
             recent_points.append(xr)
+            if trace_ops:
+                moves.append({'kind': 'reflect', 'from': simplex_pts[-1],
+                              'to': self._pt(xr)})
 
             if Jr < J_best:
                 # Expansion
@@ -226,6 +243,9 @@ class HyGO:
                 Je = self.evaluate(xe)
                 new_individuals.append((xe, Je))
                 recent_points.append(xe)
+                if trace_ops:
+                    moves.append({'kind': 'expand', 'from': simplex_pts[-1],
+                                  'to': self._pt(xe)})
                 if Je < Jr:
                     sx[-1] = xe; sc[-1] = Je
                 else:
@@ -242,6 +262,9 @@ class HyGO:
                 Jc = self.evaluate(xc)
                 new_individuals.append((xc, Jc))
                 recent_points.append(xc)
+                if trace_ops:
+                    moves.append({'kind': 'contract', 'from': simplex_pts[-1],
+                                  'to': self._pt(xc)})
 
                 if Jc < J_worst:
                     sx[-1] = xc; sc[-1] = Jc
@@ -255,6 +278,9 @@ class HyGO:
                         Js = self.evaluate(xs)
                         new_individuals.append((xs, Js))
                         recent_points.append(xs)
+                        if trace_ops:
+                            moves.append({'kind': 'shrink', 'from': simplex_pts[j],
+                                          'to': self._pt(xs)})
                         new_sx.append(xs)
                         new_sc.append(Js)
                     sx       = new_sx
@@ -272,6 +298,9 @@ class HyGO:
                     Jr2 = self.evaluate(xrand)
                     new_individuals.append((xrand, Jr2))
                     recent_points.append(xrand)
+                    if trace_ops:
+                        moves.append({'kind': 'random', 'from': centroid_pt,
+                                      'to': self._pt(xrand)})
                     if Jr2 < sc[-1]:
                         sx[-1] = xrand; sc[-1] = Jr2
                     attempts_no_change = 0
@@ -299,8 +328,19 @@ class HyGO:
                         Jcorr = self.evaluate(xcorr)
                         new_individuals.append((xcorr, Jcorr))
                         recent_points.append(xcorr)
+                        if trace_ops:
+                            moves.append({'kind': 'r2', 'from': centroid_pt,
+                                          'to': self._pt(xcorr)})
                         if Jcorr < sc[-1]:
                             sx[-1] = xcorr; sc[-1] = Jcorr
+
+            if trace_ops:
+                self._emit_progress('dsm', None, None, {
+                    'type': 'dsm',
+                    'simplex': simplex_pts,
+                    'centroid': centroid_pt,
+                    'moves': moves,
+                })
 
         return new_individuals
 
@@ -331,6 +371,14 @@ class HyGO:
             init_xs = [self.lo + self.rng.random(self.dim) * (self.hi - self.lo)
                        for _ in range(self.Nexplor)]
 
+        if self.progress_hook is not None and self.dim == 2:
+            self._emit_progress('init', 0, init_xs, {
+                'type': 'lhs',
+                'strata': self.Nexplor,
+                'reorder': False,
+                'stage': 'sample',
+            })
+
         for x in init_xs:
             pop_x.append(x)
             pop_costs.append(self.evaluate(x))
@@ -339,7 +387,12 @@ class HyGO:
         pop_x, pop_costs, pop_chroms = self._sort_pop(pop_x, pop_costs, pop_chroms)
 
         self.gen_best.append(self.best_cost)
-        self._emit_progress('init', 0, pop_x)
+        self._emit_progress('init', 0, pop_x, {
+            'type': 'lhs',
+            'strata': self.Nexplor,
+            'reorder': False,
+            'stage': 'final',
+        })
         conv_gen = None
 
         # ── g = 1: exploitative stage only (lines 4–10) ──────────────────────
@@ -382,12 +435,20 @@ class HyGO:
             # Line 18: sort population.
             new_chroms = []
             new_x      = []
+            ga_links   = []
+            trace_ops  = self.progress_hook is not None and self.dim == 2
 
             # Elitism (line 15: "elitism"): carry best Ne chromosomes unchanged.
             # Their fitness is already known -- no re-evaluation needed.
             for i in range(min(self.Ne, len(pop_chroms))):
                 new_chroms.append(pop_chroms[i].copy())
                 new_x.append(pop_x[i].copy())
+                if trace_ops and len(ga_links) < 8:
+                    ga_links.append({
+                        'op': 'elite',
+                        'parents': [self._pt(pop_x[i])],
+                        'child': self._pt(pop_x[i]),
+                    })
 
             # Lines 13-16: generate remaining N_explor - Ne children.
             # Tournament selection draws from the PARENT pool (pop_chroms,
@@ -399,15 +460,25 @@ class HyGO:
                     p1          = self.tournament_select(pop_chroms, pop_costs)
                     p2          = self.tournament_select(pop_chroms, pop_costs)
                     child_chrom = self.crossover(p1, p2)
+                    op_name, op_parents = 'crossover', [p1, p2]
                 elif r < self.Pc + self.Pm:
                     # Mutation (line 15)
                     p           = self.tournament_select(pop_chroms, pop_costs)
                     child_chrom = self.mutate(p)
+                    op_name, op_parents = 'mutation', [p]
                 else:
                     # Replication (line 15)
-                    child_chrom = self.tournament_select(pop_chroms, pop_costs).copy()
+                    p = self.tournament_select(pop_chroms, pop_costs)
+                    child_chrom = p.copy()
+                    op_name, op_parents = 'replication', [p]
                 new_chroms.append(child_chrom)
                 new_x.append(self.decode(child_chrom))
+                if trace_ops and len(ga_links) < 8:
+                    ga_links.append({
+                        'op': op_name,
+                        'parents': [self._pt(self.decode(p)) for p in op_parents],
+                        'child': self._pt(new_x[-1]),
+                    })
 
             # Line 17: evaluate fitness of each individual r=1,...,N_explor.
             # Elites reuse their known cost (not re-evaluated).
@@ -425,6 +496,10 @@ class HyGO:
             pop_x, pop_costs, pop_chroms = self._trim(
                 pop_x, pop_costs, pop_chroms, self.Nexplor
             )
+
+            if trace_ops:
+                self._emit_progress('ga', gen + 1, pop_x,
+                                    {'type': 'ga', 'links': ga_links})
 
             if self.eval_count >= self.max_evals:
                 break

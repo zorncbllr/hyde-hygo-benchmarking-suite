@@ -1,4 +1,9 @@
-import type { SimulationBeat, SimSnapshot, SimulationTrace } from "./schemas";
+import type {
+  SimOps,
+  SimSnapshot,
+  SimulationBeat,
+  SimulationTrace,
+} from "./schemas";
 
 /**
  * Pure playback logic for the simulation page: decodes the backend's flat
@@ -24,6 +29,13 @@ export interface SnapshotIndex {
   evalCount: Int32Array;
   bestCost: Float64Array;
   bestXs: Array<[number, number] | null>;
+  /**
+   * Per gen snapshot: lookup key. Snapshots carry the trace event index
+   * they were emitted at, so playback resolves the exact intra-phase stage
+   * (LHS draw -> farthest-point reorder -> evaluated pool) even though all
+   * init stages share eval_count 0.
+   */
+  genKey: Int32Array;
   genEvalCount: Int32Array;
   genPhase: Array<string | null>;
   genGen: Array<number | null>;
@@ -35,6 +47,16 @@ export interface SnapshotIndex {
    * CMA-ES that do not emit one).
    */
   genPosFilled: Int32Array;
+  /**
+   * Per gen snapshot: operator geometry carried by that snapshot.
+   */
+  genOps: Array<SimOps | null>;
+  /**
+   * For each gen snapshot: index of the nearest earlier-or-equal snapshot
+   * that carries operator geometry (ops forward-fill independently of
+   * positions: e.g. DSM emits carry ops but no population).
+   */
+  genOpsFilled: Int32Array;
 }
 
 /**
@@ -51,21 +73,26 @@ export function buildSnapshotIndex(snapshots: SimSnapshot[]): SnapshotIndex {
   const genGen: Array<number | null> = [];
   const genPositions: Array<Array<[number, number]> | null> = [];
   const genBestX: Array<[number, number] | null> = [];
+  const genOps: Array<SimOps | null> = [];
+  const genKey: number[] = [];
   const genPosFilled: number[] = [];
+  const genOpsFilled: number[] = [];
   let lastPosIdx = -1;
+  let lastOpsIdx = -1;
 
   for (const s of snapshots) {
     if (s.kind === "eval") {
       const prev = evalCount[evalCount.length - 1] ?? -1;
       if (s.eval_count <= prev) continue; // defensive: keep series sorted
       evalCount.push(s.eval_count);
-      bestCost.push(s.best_cost);
+      bestCost.push(s.best_cost ?? Number.POSITIVE_INFINITY);
       bestXs.push(
         s.best_x && s.best_x.length >= 2 ? [s.best_x[0], s.best_x[1]] : null,
       );
     } else {
-      const prev = genEvalCount[genEvalCount.length - 1] ?? -1;
-      if (s.eval_count < prev) continue;
+      const prev = genKey[genKey.length - 1] ?? -1;
+      if ((s.event_idx ?? s.eval_count) < prev) continue; // defensive
+      genKey.push(s.event_idx ?? s.eval_count);
       genEvalCount.push(s.eval_count);
       genPhase.push(s.phase);
       genGen.push(s.gen);
@@ -77,8 +104,11 @@ export function buildSnapshotIndex(snapshots: SimSnapshot[]): SnapshotIndex {
       genBestX.push(
         s.best_x && s.best_x.length >= 2 ? [s.best_x[0], s.best_x[1]] : null,
       );
+      genOps.push(s.ops ?? null);
       if (s.positions) lastPosIdx = genPositions.length - 1;
       genPosFilled.push(lastPosIdx);
+      if (s.ops) lastOpsIdx = genOps.length - 1;
+      genOpsFilled.push(lastOpsIdx);
     }
   }
 
@@ -88,12 +118,15 @@ export function buildSnapshotIndex(snapshots: SimSnapshot[]): SnapshotIndex {
     evalCount: Int32Array.from(evalCount),
     bestCost: Float64Array.from(bestCost),
     bestXs,
+    genKey: Int32Array.from(genKey),
     genEvalCount: Int32Array.from(genEvalCount),
     genPhase,
     genGen,
     genPositions,
     genBestX,
+    genOps,
     genPosFilled: Int32Array.from(genPosFilled),
+    genOpsFilled: Int32Array.from(genOpsFilled),
   };
 }
 
@@ -172,6 +205,12 @@ export interface SimFrame {
   prevPositions: Array<[number, number]> | null;
   genNumber: number | null;
   genPhase: string | null;
+  /**
+   * Operator-level geometry of the current step (forward-filled through
+   * snapshots that carry none): LHS strata, DE mutation inputs, recovery
+   * moves, the CMA-ES distribution, GA links or the DSM simplex.
+   */
+  ops: SimOps | null;
   /** best-so-far curve up to the current step */
   evalCurve: Array<{ e: number; c: number }>;
   /** best-position trail up to the current step (decision space) */
@@ -192,7 +231,7 @@ export function buildFrame(
     beatIdx >= 0 && beatIdx < trace.beats.length ? trace.beats[beatIdx] : null;
 
   const evalAt = lastAtMost(snaps.evalCount, snaps.evalLen, evalCount);
-  const genAt = lastAtMost(snaps.genEvalCount, snaps.genLen, evalCount);
+  const genAt = lastAtMost(snaps.genKey, snaps.genLen, i);
 
   const evalCurve: Array<{ e: number; c: number }> = [];
   for (let j = 0; j <= evalAt; j++) {
@@ -211,6 +250,7 @@ export function buildFrame(
   const posIdx = genAt >= 0 ? snaps.genPosFilled[genAt] : -1;
   // the generation completed before the one on display (movement source)
   const prevPosIdx = posIdx > 0 ? snaps.genPosFilled[posIdx - 1] : -1;
+  const opsIdx = genAt >= 0 ? snaps.genOpsFilled[genAt] : -1;
 
   return {
     idx: i,
@@ -229,6 +269,7 @@ export function buildFrame(
         : null,
     genNumber: posIdx >= 0 ? snaps.genGen[posIdx] : null,
     genPhase: posIdx >= 0 ? snaps.genPhase[posIdx] : null,
+    ops: opsIdx >= 0 ? snaps.genOps[opsIdx] : null,
     evalCurve,
     trail,
   };
@@ -320,6 +361,38 @@ export function prevBeatIndex(d: DecodedTrace, idx: number): number {
   let k = j - 1;
   while (k > 0 && d.beatIdxs[k - 1] === prevBeat) k--;
   return k;
+}
+
+/**
+ * Phases whose line-by-line execution is mechanical bookkeeping (the
+ * binary encode/decode grid loops and per-evaluation cost bookkeeping);
+ * playback fast-forwards through contiguous stretches of these instead
+ * of ticking every line.
+ */
+export const FAST_FORWARD_PHASES: ReadonlySet<string> = new Set([
+  "encode",
+  "eval",
+]);
+
+/**
+ * First event index at or after ``idx`` that is not inside a
+ * fast-forward phase run. If ``idx`` itself is not in one it is
+ * returned unchanged; otherwise the entire contiguous run (e.g. a
+ * population-wide encode/decode loop) is skipped in a single step.
+ */
+export function fastForwardIndex(
+  d: DecodedTrace,
+  beats: SimulationBeat[],
+  idx: number,
+): number {
+  const isFast = (k: number): boolean => {
+    const bi = d.beatIdxs[k];
+    return bi >= 0 && FAST_FORWARD_PHASES.has(beats[bi]?.phase ?? "");
+  };
+  if (idx >= d.n || !isFast(idx)) return idx;
+  let j = idx;
+  while (j < d.n - 1 && isFast(j)) j++;
+  return j;
 }
 
 /** First event of the next phase segment. */

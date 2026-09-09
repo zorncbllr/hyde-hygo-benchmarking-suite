@@ -457,14 +457,123 @@ export const simulationBeatSchema = z.object({
 
 export type SimulationBeat = z.infer<typeof simulationBeatSchema>;
 
+const simPoint = z.tuple([z.number(), z.number()]);
+
+/**
+ * Operator-level geometry for the simulation visualizer (decision space).
+ * Each variant annotates the snapshot with what the algorithm's operators
+ * actually did at that point: LHS strata, DE mutation inputs, recovery /
+ * tunneling moves, the CMA-ES sampling distribution, GA parent links and
+ * the DSM simplex with its active moves.
+ */
+export const simOpsSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("lhs"),
+    strata: z.number().int().min(1),
+    /** farthest-point reordering applied to the samples (HyDE variants) */
+    reorder: z.boolean().optional(),
+    /** LHS sampled in qubit theta space, observed through sin^2 */
+    qubit: z.boolean().optional(),
+    /** init replay stage: raw draw, reordered sequence, evaluated pool */
+    stage: z.enum(["sample", "reorder", "final"]).optional(),
+    /** greedy step number (1-based) while stage = reorder */
+    step: z.number().int().min(1).optional(),
+    /** original sample indices selected so far, in visit order */
+    order: z.array(z.number().int().min(0)).optional(),
+    /** per-sample min squared distance to the selected set */
+    dists: z.array(z.number()).optional(),
+    /** index the distances were just anchored from */
+    last: z.number().int().min(0).optional(),
+  }),
+  z.object({
+    type: z.literal("mutation"),
+    samples: z.array(
+      z.object({
+        x: simPoint,
+        best: simPoint,
+        r1: simPoint,
+        r2: simPoint,
+        f: z.number(),
+        /** crossover child (decision space) evaluated this generation */
+        child: simPoint,
+        /** whether selection accepted the child over its parent */
+        accepted: z.boolean(),
+      }),
+    ),
+  }),
+  z.object({
+    type: z.literal("bitflip"),
+    moves: z.array(z.object({ from: simPoint, to: simPoint })),
+  }),
+  z.object({
+    type: z.literal("gauss"),
+    moves: z.array(z.object({ from: simPoint, to: simPoint })),
+  }),
+  z.object({
+    type: z.literal("tunnel"),
+    moves: z.array(z.object({ from: simPoint, to: simPoint, s: z.number() })),
+  }),
+  z.object({
+    type: z.literal("cmaes"),
+    mean: simPoint,
+    /** distribution mean before this generation's update */
+    mean_old: simPoint.optional(),
+    axes: z.tuple([simPoint, simPoint]),
+    sigma: z.number(),
+    restart: z.number().int().min(0),
+    /** best-mu rank selection flags, aligned with the offspring positions */
+    sel_flags: z.array(z.boolean()).optional(),
+  }),
+  z.object({
+    type: z.literal("ga"),
+    links: z.array(
+      z.object({
+        op: z.enum(["crossover", "mutation", "replication", "elite"]),
+        parents: z.array(simPoint).max(2),
+        child: simPoint,
+      }),
+    ),
+  }),
+  z.object({
+    type: z.literal("dsm"),
+    simplex: z.array(simPoint),
+    centroid: simPoint,
+    moves: z.array(
+      z.object({
+        kind: z.enum([
+          "reflect",
+          "expand",
+          "contract",
+          "shrink",
+          "random",
+          "r2",
+        ]),
+        from: simPoint,
+        to: simPoint,
+      }),
+    ),
+  }),
+]);
+
+export type SimOps = z.infer<typeof simOpsSchema>;
+
 export const simSnapshotSchema = z.object({
   kind: z.enum(["eval", "gen"]),
+  /** trace event index at emission; keys the gen-snapshot lookup */
+  event_idx: z.number().int().min(0),
   eval_count: z.number().int(),
-  best_cost: z.number(),
+  /**
+   * Nullable: init-stage snapshots (raw LHS draw / reorder) are emitted
+   * before any evaluation, where best_cost is +inf and the JSON bridge
+   * maps infinite floats to null. Playback reads costs from the eval
+   * series, so a null here is never consumed.
+   */
+  best_cost: z.number().nullable(),
   best_x: z.array(z.number()).nullable(),
   phase: z.string().nullable(),
   gen: z.number().int().nullable(),
   positions: z.array(z.tuple([z.number(), z.number()])).nullable(),
+  ops: simOpsSchema.nullable(),
 });
 
 export type SimSnapshot = z.infer<typeof simSnapshotSchema>;
