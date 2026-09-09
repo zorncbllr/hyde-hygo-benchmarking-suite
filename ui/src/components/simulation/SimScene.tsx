@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Box, Map } from "lucide-react";
+import { Maximize2, Minimize2, Box, Map } from "lucide-react";
 import BenchScene from "@/components/scene/BenchScene";
 import SceneStatsOverlay, {
   type SceneStatRow,
@@ -17,10 +17,19 @@ import {
 import { formatSci } from "@/lib/formatters";
 import { cn } from "@/lib/utils";
 
+export type SimSceneView = "map" | "3d";
+
 interface SimSceneProps {
   surface: SurfaceResponse;
   algoKey: AlgoKey;
   frame: SimFrame;
+  /** controlled map/3d view; hoisted so the maximized dialog keeps the same view */
+  view?: SimSceneView;
+  onViewChange?: (view: SimSceneView) => void;
+  /** whether this instance fills the maximized dialog */
+  maximized?: boolean;
+  /** when provided, renders a maximize/minimize toggle in the scene toolbar */
+  onToggleMaximize?: () => void;
 }
 
 /**
@@ -28,8 +37,21 @@ interface SimSceneProps {
  * comprehension-first top-down contour map (population + movement arrows +
  * trail); the 3D surface remains available as a secondary perspective.
  */
-export default function SimScene({ surface, algoKey, frame }: SimSceneProps) {
-  const [view, setView] = useState<"map" | "3d">("map");
+export default function SimScene({
+  surface,
+  algoKey,
+  frame,
+  view: viewProp,
+  onViewChange,
+  maximized = false,
+  onToggleMaximize,
+}: SimSceneProps) {
+  const [localView, setLocalView] = useState<SimSceneView>("map");
+  const view = viewProp ?? localView;
+  const setView = (v: SimSceneView) => {
+    setLocalView(v);
+    onViewChange?.(v);
+  };
 
   const heightField = useMemo(
     () => buildHeightField(surface.zs, true),
@@ -130,35 +152,62 @@ export default function SimScene({ surface, algoKey, frame }: SimSceneProps) {
           current best
         </span>
       </div>
-      <div className="absolute top-2 right-2 z-10 flex overflow-hidden rounded-md border bg-background/80 p-0.5 shadow-sm backdrop-blur">
-        <button
-          type="button"
-          title="Top-down contour map"
-          onClick={() => setView("map")}
-          className={cn(
-            "flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors",
-            view === "map"
-              ? "bg-primary/20 font-medium text-foreground"
-              : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          <Map className="h-3.5 w-3.5" />
-          Map
-        </button>
-        <button
-          type="button"
-          title="3D surface perspective"
-          onClick={() => setView("3d")}
-          className={cn(
-            "flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors",
-            view === "3d"
-              ? "bg-primary/20 font-medium text-foreground"
-              : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          <Box className="h-3.5 w-3.5" />
-          3D
-        </button>
+      <div className="absolute top-2 right-2 z-10 flex items-start gap-1.5">
+        <div className="flex overflow-hidden rounded-md border bg-background/80 p-0.5 shadow-sm backdrop-blur">
+          <button
+            type="button"
+            title="Top-down contour map"
+            onClick={() => setView("map")}
+            className={cn(
+              "flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors",
+              view === "map"
+                ? "bg-primary/20 font-medium text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Map className="h-3.5 w-3.5" />
+            Map
+          </button>
+          <button
+            type="button"
+            title="3D surface perspective"
+            onClick={() => setView("3d")}
+            className={cn(
+              "flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors",
+              view === "3d"
+                ? "bg-primary/20 font-medium text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Box className="h-3.5 w-3.5" />
+            3D
+          </button>
+        </div>
+        {onToggleMaximize && (
+          <button
+            type="button"
+            title={maximized ? "Minimize" : "Maximize"}
+            aria-label={
+              maximized
+                ? "Minimize map visualization"
+                : "Maximize map visualization"
+            }
+            onClick={onToggleMaximize}
+            className={cn(
+              "flex items-center gap-1 rounded-md border bg-background/80 px-2 py-1 text-xs shadow-sm backdrop-blur transition-colors",
+              maximized
+                ? "bg-primary/20 font-medium text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {maximized ? (
+              <Minimize2 className="h-3.5 w-3.5" />
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5" />
+            )}
+            {maximized ? "Minimize" : "Maximize"}
+          </button>
+        )}
       </div>
     </div>
   );

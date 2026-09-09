@@ -18,7 +18,23 @@ vi.mock("@/lib/api", () => ({
 
 // three.js/WebGL and echarts canvas are unavailable in jsdom
 vi.mock("@/components/simulation/SimScene", () => ({
-  default: () => <div data-testid="sim-scene-mock" />,
+  default: ({
+    maximized,
+    onToggleMaximize,
+  }: {
+    maximized?: boolean;
+    onToggleMaximize?: () => void;
+  }) => (
+    <div data-testid="sim-scene-mock">
+      {onToggleMaximize && (
+        <button
+          type="button"
+          title={maximized ? "Minimize" : "Maximize"}
+          onClick={onToggleMaximize}
+        />
+      )}
+    </div>
+  ),
 }));
 vi.mock("@/components/simulation/SimConvergenceChart", () => ({
   default: () => <div data-testid="sim-chart-mock" />,
@@ -128,6 +144,28 @@ describe("SimulationView", () => {
     fireEvent.change(evalsInput, { target: { value: "99" } });
     fireEvent.click(screen.getByRole("button", { name: /run/i }));
     expect(mockFetchTrace.mock.calls.length).toBe(calls);
+  });
+
+  it("maximizes into a two-panel view and minimizes back", async () => {
+    render(<SimulationView />);
+    await waitFor(() => {
+      expect(screen.getByTestId("sim-scene-mock")).toBeInTheDocument();
+    });
+    expect(screen.queryByTitle("Minimize")).not.toBeInTheDocument();
+
+    // maximize: dialog opens with scene and code side by side
+    fireEvent.click(screen.getByTitle("Maximize"));
+    await waitFor(() => {
+      expect(screen.getAllByTestId("sim-scene-mock")).toHaveLength(2);
+    });
+    expect(screen.getAllByText("source of truth")).toHaveLength(2);
+
+    // minimize: back to the single workspace layout
+    fireEvent.click(screen.getAllByTitle("Minimize")[0]);
+    await waitFor(() => {
+      expect(screen.getAllByTestId("sim-scene-mock")).toHaveLength(1);
+    });
+    expect(screen.queryByTitle("Minimize")).not.toBeInTheDocument();
   });
 
   it("shows an error state when the backend fails", async () => {
