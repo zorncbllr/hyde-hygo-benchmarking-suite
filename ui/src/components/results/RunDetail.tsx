@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import * as echarts from "echarts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import echarts, { type EChartsOption } from "@/lib/echarts";
 import { toast } from "sonner";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -86,27 +86,41 @@ function quartiles(values: number[]): [number, number, number, number, number] {
   return [sorted[0], q(0.25), q(0.5), q(0.75), sorted[sorted.length - 1]];
 }
 
-/** Simple echarts host that rebuilds the option on change. */
+/**
+ * Simple echarts host: the instance is created once per mount and option
+ * changes are applied as incremental setOption updates instead of tearing
+ * down and re-initializing the whole chart (canvas + renderer) on every
+ * option identity change.
+ */
 function Chart({
   option,
   height = 300,
 }: {
-  option: echarts.EChartsOption;
+  option: EChartsOption;
   height?: number;
 }) {
-  const [el, setEl] = useState<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<echarts.ECharts | null>(null);
+
   useEffect(() => {
-    if (!el) return;
-    const chart = echarts.init(el);
-    chart.setOption(option);
+    if (!containerRef.current) return;
+    const chart = echarts.init(containerRef.current);
+    chartRef.current = chart;
     const onResize = () => chart.resize();
     window.addEventListener("resize", onResize);
     return () => {
       window.removeEventListener("resize", onResize);
       chart.dispose();
+      chartRef.current = null;
     };
-  }, [el, option]);
-  return <div ref={setEl} style={{ width: "100%", height }} />;
+  }, []);
+
+  useEffect(() => {
+    // runs after the init effect on mount, so the chart always exists here
+    chartRef.current?.setOption(option, { lazyUpdate: true });
+  }, [option]);
+
+  return <div ref={containerRef} style={{ width: "100%", height }} />;
 }
 
 interface RunDetailProps {
@@ -237,7 +251,7 @@ export default function RunDetail({
     if (replayRun >= nRuns) setReplayRun(0);
   }, [payloads, replayAlgo, replayRun]);
 
-  const convergenceOption = useMemo<echarts.EChartsOption>(
+  const convergenceOption = useMemo<EChartsOption>(
     () => ({
       animation: false,
       backgroundColor: "transparent",
@@ -269,7 +283,7 @@ export default function RunDetail({
     [payloads],
   );
 
-  const boxOption = useMemo<echarts.EChartsOption>(
+  const boxOption = useMemo<EChartsOption>(
     () => ({
       animation: false,
       backgroundColor: "transparent",

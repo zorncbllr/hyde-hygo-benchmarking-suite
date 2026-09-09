@@ -370,16 +370,19 @@ export default function SimulationView() {
           </DialogHeader>
           {surface && trace && frame && (
             <div className="flex min-h-0 flex-1 gap-3">
-              <div className="min-h-0 w-1/2 overflow-hidden rounded-lg border">
-                <SimScene
-                  surface={surface}
-                  algoKey={algoKey}
-                  frame={frame}
-                  view={sceneView}
-                  onViewChange={setSceneView}
-                  maximized
-                  onToggleMaximize={toggleMaximize}
-                />
+              <div className="flex min-h-0 w-1/2 flex-col gap-3">
+                <div className="min-h-0 flex-1 overflow-hidden rounded-lg border">
+                  <SimScene
+                    surface={surface}
+                    algoKey={algoKey}
+                    frame={frame}
+                    view={sceneView}
+                    onViewChange={setSceneView}
+                    maximized
+                    onToggleMaximize={toggleMaximize}
+                  />
+                </div>
+                <SimControls player={player} />
               </div>
               <div className="min-h-0 w-1/2">
                 <CodePanel

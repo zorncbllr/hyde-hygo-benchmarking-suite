@@ -160,6 +160,15 @@ describe("SimulationView", () => {
     });
     expect(screen.getAllByText("source of truth")).toHaveLength(2);
 
+    // playback controls are available inside the maximized dialog and share
+    // state with the main workspace (both scrubbers show the same step)
+    expect(screen.getAllByText(/step 1\/6/)).toHaveLength(2);
+    const playButtons = screen.getAllByRole("button", { name: "Play" });
+    fireEvent.click(playButtons[playButtons.length - 1]!);
+    await waitFor(() => {
+      expect(screen.getAllByText(/step 2\/6/)).toHaveLength(2);
+    });
+
     // minimize: back to the single workspace layout
     fireEvent.click(screen.getAllByTitle("Minimize")[0]);
     await waitFor(() => {

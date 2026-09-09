@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import * as echarts from "echarts";
+import echarts from "@/lib/echarts";
 import { ALGO_COLORS, ALGO_KEYS, ALGO_LABELS } from "@/lib/schemas";
 
 /** Coalescing window: echarts updates at most once per window. */
