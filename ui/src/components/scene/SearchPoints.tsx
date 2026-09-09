@@ -25,11 +25,23 @@ interface SearchPointsProps {
 }
 
 const TRAIL_MAX = 500;
+/** initial capacity of the persistent population buffer (grows on demand) */
+const POINTS_CAP_INIT = 64;
+/** fixed bounding sphere: positions are normalized to [0,1]^2, heights ~[0,1] */
+const BOUNDS = new THREE.Sphere(new THREE.Vector3(0, 0.5, 0), 1.6);
 
 interface AlgoObjects {
   points: THREE.Points;
   /** either a plain THREE.Line (legacy) or a width-scaled Line2 */
   line: THREE.Line | Line2;
+  /**
+   * Persistent position attribute reused across telemetry ticks. Replacing
+   * an attribute with a fresh one leaks the previous GPU buffer (three.js
+   * only frees it on dispose), so buffers are written in place instead.
+   */
+  pointsAttr: THREE.BufferAttribute;
+  /** persistent trail attribute for the plain-line path (capacity TRAIL_MAX) */
+  trailAttr: THREE.BufferAttribute;
 }
 
 /**
@@ -70,8 +82,16 @@ export default function SearchPoints({
     objectsRef.current = {};
     for (const algo of algos) {
       const color = ALGO_COLORS[algo as AlgoKey] ?? "#ffffff";
+      const pointsGeo = new THREE.BufferGeometry();
+      const pointsAttr = new THREE.BufferAttribute(
+        new Float32Array(POINTS_CAP_INIT * 3),
+        3,
+      );
+      pointsGeo.setAttribute("position", pointsAttr);
+      pointsGeo.boundingSphere = BOUNDS.clone();
+      pointsGeo.setDrawRange(0, 0);
       const points = new THREE.Points(
-        new THREE.BufferGeometry(),
+        pointsGeo,
         new THREE.PointsMaterial({
           size: pointSize,
           color,
@@ -81,6 +101,7 @@ export default function SearchPoints({
         }),
       );
       let line: THREE.Line | Line2;
+      let trailAttr: THREE.BufferAttribute;
       if (trailWidth > 0) {
         const material = new LineMaterial({
           color: new THREE.Color(color).getHex(),
@@ -90,9 +111,18 @@ export default function SearchPoints({
         });
         material.resolution.set(size.width, size.height);
         line = new Line2(new LineGeometry(), material);
+        trailAttr = new THREE.BufferAttribute(new Float32Array(0), 3);
       } else {
+        const lineGeo = new THREE.BufferGeometry();
+        trailAttr = new THREE.BufferAttribute(
+          new Float32Array(TRAIL_MAX * 3),
+          3,
+        );
+        lineGeo.setAttribute("position", trailAttr);
+        lineGeo.boundingSphere = BOUNDS.clone();
+        lineGeo.setDrawRange(0, 0);
         line = new THREE.Line(
-          new THREE.BufferGeometry(),
+          lineGeo,
           new THREE.LineBasicMaterial({
             color,
             transparent: true,
@@ -100,11 +130,26 @@ export default function SearchPoints({
           }),
         );
       }
-      objectsRef.current[algo] = { points, line };
+      objectsRef.current[algo] = { points, line, pointsAttr, trailAttr };
     }
     forceRender((n) => n + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [algosKey]);
+
+  // Dispose all GPU resources when the scene unmounts. Objects attached via
+  // <primitive> are exempt from R3F auto-disposal, and scenes are torn down
+  // whenever preview dialogs close / pages switch.
+  useEffect(() => {
+    return () => {
+      for (const obj of Object.values(objectsRef.current)) {
+        obj.points.geometry.dispose();
+        (obj.points.material as THREE.Material).dispose();
+        obj.line.geometry.dispose();
+        (obj.line.material as THREE.Material).dispose();
+      }
+      objectsRef.current = {};
+    };
+  }, []);
 
   // LineMaterial computes pixel widths from the canvas resolution.
   useEffect(() => {
@@ -119,7 +164,8 @@ export default function SearchPoints({
   }, [size, trailWidth, invalidate]);
 
   // Update buffers at telemetry rate. The canvas renders on demand, so each
-  // buffer write must explicitly request a frame.
+  // buffer write must explicitly request a frame. Typed arrays are reused
+  // across ticks; GPU buffers are only re-allocated on capacity growth.
   useEffect(() => {
     for (const [algo, obj] of Object.entries(objectsRef.current)) {
       const show = visible[algo as AlgoKey] ?? true;
@@ -127,17 +173,25 @@ export default function SearchPoints({
       obj.line.visible = show;
 
       const pts = positions[algo] ?? [];
-      const pArr = new Float32Array(Math.max(pts.length, 1) * 3);
+      const nPts = Math.max(pts.length, 1);
+      let pAttr = obj.pointsAttr;
+      if (pAttr.array.length < nPts * 3) {
+        // Rare capacity growth: dispose the geometry so the renderer frees
+        // the old GPU buffer, then attach the larger attribute. Geometry is
+        // re-uploaded on the next frame.
+        obj.points.geometry.dispose();
+        pAttr = new THREE.BufferAttribute(new Float32Array(nPts * 3), 3);
+        obj.pointsAttr = pAttr;
+        obj.points.geometry.setAttribute("position", pAttr);
+      }
+      const pArr = pAttr.array as Float32Array;
       pts.forEach(([xn, yn], i) => {
         pArr[i * 3] = xn - 0.5;
         pArr[i * 3 + 1] = heightAt(xn, yn) + 0.02;
         pArr[i * 3 + 2] = yn - 0.5;
       });
-      obj.points.geometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(pArr, 3),
-      );
-      obj.points.geometry.computeBoundingSphere();
+      pAttr.needsUpdate = true;
+      obj.points.geometry.setDrawRange(0, pts.length);
 
       const trail = (trajectories[algo] ?? []).slice(-TRAIL_MAX);
       if (obj.line instanceof Line2) {
@@ -151,22 +205,25 @@ export default function SearchPoints({
             flat[i * 3 + 1] = heightAt(xn, yn) + 0.03;
             flat[i * 3 + 2] = yn - 0.5;
           });
-          (obj.line.geometry as LineGeometry).setPositions(Array.from(flat));
+          // LineGeometry.setPositions replaces its instanced attributes on
+          // every call; dispose the previous geometry so its GPU buffers
+          // are freed instead of leaking one set per tick.
+          obj.line.geometry.dispose();
+          const g = new LineGeometry();
+          g.setPositions(Array.from(flat));
+          obj.line.geometry = g;
           obj.line.computeLineDistances();
           obj.line.visible = show;
         }
       } else {
-        const lArr = new Float32Array(Math.max(trail.length, 1) * 3);
+        const tArr = obj.trailAttr.array as Float32Array;
         trail.forEach(([xn, yn], i) => {
-          lArr[i * 3] = xn - 0.5;
-          lArr[i * 3 + 1] = heightAt(xn, yn) + 0.03;
-          lArr[i * 3 + 2] = yn - 0.5;
+          tArr[i * 3] = xn - 0.5;
+          tArr[i * 3 + 1] = heightAt(xn, yn) + 0.03;
+          tArr[i * 3 + 2] = yn - 0.5;
         });
-        obj.line.geometry.setAttribute(
-          "position",
-          new THREE.BufferAttribute(lArr, 3),
-        );
-        obj.line.geometry.computeBoundingSphere();
+        obj.trailAttr.needsUpdate = true;
+        obj.line.geometry.setDrawRange(0, trail.length);
       }
     }
     invalidate();

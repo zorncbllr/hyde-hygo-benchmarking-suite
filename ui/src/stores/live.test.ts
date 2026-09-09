@@ -50,10 +50,10 @@ function runDone(overrides: Partial<RunDoneEvent> = {}): RunDoneEvent {
   };
 }
 
-function scenarioDone(): ScenarioDoneEvent {
+function scenarioDone(key = "booth_2D"): ScenarioDoneEvent {
   return {
     run_id: "r1",
-    key: "booth_2D",
+    key,
     elapsed_s: 1,
     best_algo: "hygo",
     medians: { hygo: 1, hyde_bin: 2 },
@@ -195,6 +195,17 @@ describe("live store", () => {
     const s = useLiveStore.getState();
     expect(s.scenariosDone).toBe(1);
     expect(s.scenarioSummaries[0].best_algo).toBe("hygo");
+  });
+
+  it("scenario summaries are capped at MAX_SCENARIO_SUMMARIES", async () => {
+    useLiveStore.getState().applyStarted(started());
+    for (let i = 0; i < 150; i++) {
+      useLiveStore.getState().applyScenarioDone(scenarioDone(`f_${i}`));
+    }
+    const { MAX_SCENARIO_SUMMARIES } = await import("@/stores/live");
+    const s = useLiveStore.getState();
+    expect(s.scenarioSummaries.length).toBe(MAX_SCENARIO_SUMMARIES);
+    expect(s.scenarioSummaries[0].key).toBe("f_149");
   });
 
   it("complete and error set terminal status", () => {

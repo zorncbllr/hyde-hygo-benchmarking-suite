@@ -11,6 +11,7 @@ import type {
 import { ALGO_KEYS } from "@/lib/schemas";
 
 export const MAX_ROWS = 200;
+export const MAX_SCENARIO_SUMMARIES = 100;
 
 export interface LiveRow {
   key: string;
@@ -215,7 +216,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       scenarioSummaries: [
         { key: p.key, best_algo: p.best_algo, medians: p.medians },
         ...s.scenarioSummaries,
-      ],
+      ].slice(0, MAX_SCENARIO_SUMMARIES),
     })),
 
   applyComplete: (p) => set({ status: "completed", elapsedS: p.duration_s }),
