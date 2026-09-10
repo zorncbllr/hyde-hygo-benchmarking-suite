@@ -377,6 +377,7 @@ class HyGO:
                 'strata': self.Nexplor,
                 'reorder': False,
                 'stage': 'sample',
+                'levels': int(self.n_vals),
             })
 
         for x in init_xs:
@@ -392,6 +393,7 @@ class HyGO:
             'strata': self.Nexplor,
             'reorder': False,
             'stage': 'final',
+            'levels': int(self.n_vals),
         })
         conv_gen = None
 

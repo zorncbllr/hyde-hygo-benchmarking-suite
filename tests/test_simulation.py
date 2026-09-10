@@ -156,6 +156,12 @@ def test_init_ops_carry_lhs_strata(algo_key: str) -> None:
     ops = init_ops[0]
     assert ops["type"] == "lhs"
     assert ops["strata"] >= 1
+    # encoded variants (and HyGO) expose the discrete grid resolution so
+    # the visualizer can derive post-snap stratum membership exactly
+    if algo_key in ("hyde_qub", "hyde_con"):
+        assert "levels" not in ops  # no discrete encoding to snap onto
+    else:
+        assert ops["levels"] >= 2
     # farthest-point reordering is a HyDE-variant step (N > 4), never HyGO
     if algo_key == "hygo":
         assert ops["reorder"] is False

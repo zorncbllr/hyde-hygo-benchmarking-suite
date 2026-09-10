@@ -139,9 +139,27 @@ export default function SimulationView() {
   }, [algoKey]);
 
   const player = useSimPlayer(trace);
-  const { surface, error: surfaceError } = useSurface(fname);
+  // The terrain must describe the same scenario as the loaded trace;
+  // keying on the trace's own fname guarantees that pairing regardless
+  // of what the scenario dropdown is currently set to.
+  const traceFname = trace?.fname ?? fname;
+  const { surface, error: surfaceError } = useSurface(traceFname);
   const frame = player.frame;
   const toggleMaximize = useCallback(() => setMaximized((m) => !m), []);
+
+  // The map renders only when the surface covers the exact decision-space
+  // region the trace ran on; otherwise a brief terrain load state is shown
+  // instead of a silently misaligned overlay.
+  const terrainReady = useMemo(
+    () =>
+      !!surface &&
+      !!trace &&
+      surface.lo[0] === trace.lo[0] &&
+      surface.lo[1] === trace.lo[1] &&
+      surface.hi[0] === trace.hi[0] &&
+      surface.hi[1] === trace.hi[1],
+    [surface, trace],
+  );
 
   const resultBadges = useMemo(() => {
     if (!trace) return null;
@@ -274,10 +292,14 @@ export default function SimulationView() {
               </>
             )}
             <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border">
-              {surface && trace && frame ? (
+              {terrainReady && trace && frame ? (
                 <SimScene
-                  surface={surface}
-                  algoKey={algoKey}
+                  surface={surface!}
+                  traceBounds={{
+                    lo: trace.lo as [number, number],
+                    hi: trace.hi as [number, number],
+                  }}
+                  algoKey={trace.algo_key as AlgoKey}
                   frame={frame}
                   view={sceneView}
                   onViewChange={setSceneView}
@@ -290,10 +312,15 @@ export default function SimulationView() {
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Running traced simulation...
                 </div>
+              ) : trace && !surfaceError && !terrainReady ? (
+                <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading terrain...
+                </div>
               ) : (
                 <div className="flex h-full items-center justify-center px-8 text-center text-sm text-muted-foreground">
                   {surfaceError
-                    ? `Failed to load surface: ${surfaceError}`
+                    ? `Failed to load terrain: ${surfaceError}`
                     : error
                       ? `Simulation failed: ${error}`
                       : "Run a simulation to see the trace."}
@@ -369,13 +396,17 @@ export default function SimulationView() {
           <DialogHeader className="sr-only">
             <DialogTitle>Simulation - maximized</DialogTitle>
           </DialogHeader>
-          {surface && trace && frame && (
+          {terrainReady && trace && frame && (
             <div className="flex min-h-0 flex-1 gap-3">
               <div className="flex min-h-0 w-1/2 flex-col gap-3">
                 <div className="min-h-0 flex-1 overflow-hidden rounded-lg border">
                   <SimScene
-                    surface={surface}
-                    algoKey={algoKey}
+                    surface={surface!}
+                    traceBounds={{
+                      lo: trace.lo as [number, number],
+                      hi: trace.hi as [number, number],
+                    }}
+                    algoKey={trace.algo_key as AlgoKey}
                     frame={frame}
                     view={sceneView}
                     onViewChange={setSceneView}

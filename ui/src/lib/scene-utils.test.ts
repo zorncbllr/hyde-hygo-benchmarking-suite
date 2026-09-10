@@ -54,6 +54,25 @@ describe("lhsStratumIndex", () => {
     expect(lhsStratumIndex(1.5, 4, false)).toBe(3);
     expect(lhsStratumIndex(1.5, 4, true)).toBe(3);
   });
+
+  it("snaps through the discrete encoding grid when levels are given", () => {
+    // with 4096 levels and 24 strata, a point near a stratum edge rounds
+    // to the grid level it encodes onto — the stratum follows the level,
+    // not the raw position
+    const strata = 24;
+    const levels = 4096;
+    // mid-stratum point stays put
+    expect(lhsStratumIndex(0.5 / strata + 0.01, strata, false, levels)).toBe(0);
+    // a point just inside the next stratum's edge but rounding across it
+    const edge = 1 / strata - 1e-9;
+    expect(lhsStratumIndex(edge, strata, false, levels)).toBe(1);
+    // floor without levels would still report the old stratum
+    expect(lhsStratumIndex(edge, strata, false)).toBe(0);
+  });
+
+  it("keeps floor semantics when levels are absent (raw LHS draw)", () => {
+    expect(lhsStratumIndex(0.24, 24, false)).toBe(5);
+  });
 });
 
 describe("matchNearest", () => {

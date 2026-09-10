@@ -136,6 +136,7 @@ class HyDEBin:
         if self.progress_hook is not None and self.dim == 2:
             self._emit_progress('init', 0, samples, {
                 'type': 'lhs', 'strata': N, 'reorder': N > 4, 'stage': 'sample',
+                'levels': int(self.n_vals),
             })
 
         # Farthest-point reordering
@@ -155,6 +156,7 @@ class HyDEBin:
                         'strata': N,
                         'reorder': True,
                         'stage': 'reorder',
+                        'levels': int(self.n_vals),
                         'step': int(step + 1),
                         'order': [int(i) for i in sel],
                         'dists': [float(d) for d in dists],
@@ -397,6 +399,7 @@ class HyDEBin:
             'strata': N,
             'reorder': N > 4,
             'stage': 'final',
+            'levels': int(self.n_vals),
         })
 
         stag = 0

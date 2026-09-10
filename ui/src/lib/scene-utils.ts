@@ -1,8 +1,10 @@
 import type { SurfaceResponse } from "./schemas";
 
+type Bounds = Pick<SurfaceResponse, "lo" | "hi">;
+
 export function normalizePositions(
   raw: Record<string, Array<[number, number]>>,
-  surface: SurfaceResponse,
+  surface: Bounds,
 ): Record<string, Array<[number, number]>> {
   const [xlo, ylo] = surface.lo;
   const [xhi, yhi] = surface.hi;
@@ -39,15 +41,24 @@ export function lhsStrataEdges(strata: number, qubit: boolean): number[] {
 /**
  * Inverse map for the LHS overlay: which stratum index does a point at
  * normalized position ``t`` belong to (0-based)? Uniform for decision-space
- * sampling; via arcsin(sqrt(t)) for qubit-observed positions.
+ * sampling; via arcsin(sqrt(t)) for qubit-observed positions. When the
+ * variant encodes parameters on a discrete grid (``levels`` = 2^Nb), the
+ * point is first snapped to the level the algorithm's encode/decode
+ * rounds it onto — a decoded point at a stratum edge belongs to the
+ * stratum its grid level falls in, not the raw position's.
  */
 export function lhsStratumIndex(
   t: number,
   strata: number,
   qubit: boolean,
+  levels = 0,
 ): number {
   const n = Math.max(1, Math.floor(strata));
   const c = Math.min(1, Math.max(0, t));
+  if (levels >= 2 && !qubit) {
+    const level = Math.round(c * (levels - 1));
+    return Math.min(n - 1, Math.floor((level * n) / levels));
+  }
   const u = qubit ? (Math.asin(Math.sqrt(c)) * 2) / Math.PI : c;
   return Math.min(n - 1, Math.floor(u * n));
 }

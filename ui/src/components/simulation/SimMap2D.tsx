@@ -18,6 +18,10 @@ import {
 
 interface SimMap2DProps {
   surface: SurfaceResponse;
+  /** the decision-space bounds the trace actually ran on; all overlay
+   * geometry (points, strata grid, arrows) is normalized against these,
+   * never against the surface's bounds */
+  traceBounds: { lo: [number, number]; hi: [number, number] };
   algoKey: AlgoKey;
   /** current population (decision space) */
   positions: Array<[number, number]> | null;
@@ -68,6 +72,7 @@ const GA_COLORS: Record<string, string> = {
  */
 export default function SimMap2D({
   surface,
+  traceBounds,
   algoKey,
   positions,
   prevPositions,
@@ -127,8 +132,8 @@ export default function SimMap2D({
       prevPositions.length === 0
     )
       return null;
-    const [xlo, ylo] = surface.lo;
-    const [xhi, yhi] = surface.hi;
+    const [xlo, ylo] = traceBounds.lo;
+    const [xhi, yhi] = traceBounds.hi;
     const sx = xhi - xlo || 1;
     const sy = yhi - ylo || 1;
     const toN = (p: [number, number]): [number, number] => [
@@ -139,7 +144,7 @@ export default function SimMap2D({
     const prev = prevPositions.map(toN);
     const match = matchNearest(cur, prev, ARROW_MAX_DIST);
     return { cur, prev, match, any: match.some((m) => m >= 0) };
-  }, [positions, prevPositions, surface]);
+  }, [positions, prevPositions, traceBounds]);
 
   // Animate the transition: dots tween from the previous generation to
   // the new one (along the movement arrows) so DE movement is visible.
@@ -216,8 +221,8 @@ export default function SimMap2D({
     }
 
     const px = (p: Pt): [number, number] => {
-      const [xlo, ylo] = surface.lo;
-      const [xhi, yhi] = surface.hi;
+      const [xlo, ylo] = traceBounds.lo;
+      const [xhi, yhi] = traceBounds.hi;
       const sx = xhi - xlo || 1;
       const sy = yhi - ylo || 1;
       const xn = Math.min(1, Math.max(0, (p[0] - xlo) / sx));
@@ -226,8 +231,8 @@ export default function SimMap2D({
     };
 
     const norm = (p: Pt): Pt => {
-      const [xlo, ylo] = surface.lo;
-      const [xhi, yhi] = surface.hi;
+      const [xlo, ylo] = traceBounds.lo;
+      const [xhi, yhi] = traceBounds.hi;
       const sx = xhi - xlo || 1;
       const sy = yhi - ylo || 1;
       return [
@@ -321,8 +326,8 @@ export default function SimMap2D({
           ctx.globalAlpha = 0.08;
           for (const raw of positions) {
             const [xn, yn] = norm(raw);
-            const cx = lhsStratumIndex(xn, n, !!ops.qubit);
-            const cy = lhsStratumIndex(yn, n, !!ops.qubit);
+            const cx = lhsStratumIndex(xn, n, !!ops.qubit, ops.levels ?? 0);
+            const cy = lhsStratumIndex(yn, n, !!ops.qubit, ops.levels ?? 0);
             const x0 = edges[cx] * W;
             const x1 = edges[cx + 1] * W;
             // y is normalized bottom-up; cell spans edges in the same way
@@ -784,11 +789,11 @@ export default function SimMap2D({
       }
     }
 
-    // bounds caption
+    // bounds caption (the trace's decision-space domain)
     ctx.fillStyle = "rgba(255,255,255,0.55)";
     ctx.font = "10px ui-monospace, monospace";
     ctx.fillText(
-      `x ${surface.lo[0].toFixed(1)}..${surface.hi[0].toFixed(1)}  y ${surface.lo[1].toFixed(1)}..${surface.hi[1].toFixed(1)}`,
+      `x ${traceBounds.lo[0].toFixed(1)}..${traceBounds.hi[0].toFixed(1)}  y ${traceBounds.lo[1].toFixed(1)}..${traceBounds.hi[1].toFixed(1)}`,
       8,
       H - 8,
     );
@@ -801,9 +806,11 @@ export default function SimMap2D({
     bestX,
     ops,
     surface,
+    traceBounds,
     color,
     transition,
     animT,
+    highlightResult,
   ]);
 
   return (

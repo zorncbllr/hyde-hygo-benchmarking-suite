@@ -22,6 +22,12 @@ export type SimSceneView = "map" | "3d";
 
 interface SimSceneProps {
   surface: SurfaceResponse;
+  /** decision-space bounds the trace ran on; overlay geometry is
+   * normalized against these, never against the surface's bounds */
+  traceBounds: {
+    lo: [number, number] | number[];
+    hi: [number, number] | number[];
+  };
   algoKey: AlgoKey;
   frame: SimFrame;
   /** controlled map/3d view; hoisted so the maximized dialog keeps the same view */
@@ -42,6 +48,7 @@ interface SimSceneProps {
  */
 export default function SimScene({
   surface,
+  traceBounds,
   algoKey,
   frame,
   view: viewProp,
@@ -62,15 +69,30 @@ export default function SimScene({
     [surface],
   );
 
+  // Tuple-typed view of the trace bounds for overlay geometry.
+  const mapBounds = useMemo(
+    () => ({
+      lo: traceBounds.lo as [number, number],
+      hi: traceBounds.hi as [number, number],
+    }),
+    [traceBounds],
+  );
+
   const positions = useMemo(() => {
     if (!frame.positions || frame.positions.length === 0) return {};
-    return normalizePositions({ [algoKey]: frame.positions }, surface);
-  }, [frame.positions, algoKey, surface]);
+    return normalizePositions(
+      { [algoKey]: frame.positions },
+      { lo: mapBounds.lo, hi: mapBounds.hi },
+    );
+  }, [frame.positions, algoKey, mapBounds]);
 
   const trajectories = useMemo(() => {
     if (frame.trail.length === 0) return {};
-    return normalizePositions({ [algoKey]: frame.trail }, surface);
-  }, [frame.trail, algoKey, surface]);
+    return normalizePositions(
+      { [algoKey]: frame.trail },
+      { lo: mapBounds.lo, hi: mapBounds.hi },
+    );
+  }, [frame.trail, algoKey, mapBounds]);
 
   const statRows = useMemo<SceneStatRow[]>(() => {
     const row: SceneStatRow = {
@@ -91,6 +113,7 @@ export default function SimScene({
       {view === "map" ? (
         <SimMap2D
           surface={surface}
+          traceBounds={mapBounds}
           algoKey={algoKey}
           positions={frame.positions}
           prevPositions={frame.prevPositions}

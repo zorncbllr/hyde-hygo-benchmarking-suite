@@ -476,6 +476,12 @@ export const simOpsSchema = z.discriminatedUnion("type", [
     qubit: z.boolean().optional(),
     /** init replay stage: raw draw, reordered sequence, evaluated pool */
     stage: z.enum(["sample", "reorder", "final"]).optional(),
+    /**
+     * Discrete encoding grid levels per parameter (2^Nb); when present,
+     * stratum membership must be derived through the grid the algorithm
+     * snaps decoded points onto, not by floor(normalized position).
+     */
+    levels: z.number().int().min(2).optional(),
     /** greedy step number (1-based) while stage = reorder */
     step: z.number().int().min(1).optional(),
     /** original sample indices selected so far, in visit order */
