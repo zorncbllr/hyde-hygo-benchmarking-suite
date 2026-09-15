@@ -198,9 +198,12 @@ class BenchmarkWorker(threading.Thread):
                     wilcoxon_margin_vs_hygo(key, entry, hyde_key)
                 )
 
-            (self.run_dir / "benchmark_results.json").write_text(
-                json.dumps(all_results, indent=2), encoding="utf-8"
-            )
+            # atomic write: exports / load_results may read this file
+            # concurrently between scenarios
+            results_path = self.run_dir / "benchmark_results.json"
+            tmp_path = results_path.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(all_results, indent=2), encoding="utf-8")
+            tmp_path.replace(results_path)
             self.emit(
                 "benchmark://scenario_done",
                 ScenarioDoneEvent(

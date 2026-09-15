@@ -9,9 +9,16 @@ landing inside the run's artifact directory.
 
 from __future__ import annotations
 
+import gc
 import json
 import math
+import os
+import subprocess
+import sys
 import threading
+import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -23,6 +30,15 @@ from .db.payloads import read_payload
 ExportGroup = Literal["csv", "charts", "docx", "json"]
 
 ALL_GROUPS: tuple[ExportGroup, ...] = ("csv", "charts", "docx", "json")
+
+# Upper bound for one chart function rendered in the clean subprocess
+# (make_charts loops over every benchmark; the rest render a few figures).
+CHART_SUBPROCESS_TIMEOUT = 900
+
+# The export pipeline mutates module-level constants of the reference
+# implementation; two overlapping exports would corrupt each other's
+# redirects, so the whole pipeline runs under one process-wide lock.
+_export_lock = threading.Lock()
 
 
 # -- event payloads ------------------------------------------------------------
@@ -108,9 +124,7 @@ class ExportRunner:
 def load_results(run_dir: Path) -> dict:
     path = Path(run_dir) / "benchmark_results.json"
     if not path.exists():
-        raise FileNotFoundError(
-            "benchmark_results.json not found; run the benchmark first"
-        )
+        raise FileNotFoundError("benchmark_results.json not found; run the benchmark first")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -158,18 +172,15 @@ def compute_analysis_summary(all_results: dict) -> dict:
 
     friedman_obj = rb.friedman_objective_error(all_results)
     kruskal_results = [
-        rb.run_kruskal_per_scenario(key, entry)
-        for key, entry in all_results.items()
+        rb.run_kruskal_per_scenario(key, entry) for key, entry in all_results.items()
     ]
     cochran_result = rb.cochrans_q_test(all_results)
     chi2_conv_results = [
-        rb.chi2_convergence_per_scenario(key, entry)
-        for key, entry in all_results.items()
+        rb.chi2_convergence_per_scenario(key, entry) for key, entry in all_results.items()
     ]
     friedman_wt = rb.friedman_wall_time(all_results)
     wt_kruskal_results = [
-        rb.kruskal_wall_time_per_scenario(key, entry)
-        for key, entry in all_results.items()
+        rb.kruskal_wall_time_per_scenario(key, entry) for key, entry in all_results.items()
     ]
     margin_results = [
         rb.wilcoxon_margin_vs_hygo(key, entry, hyde_key)
@@ -207,6 +218,198 @@ def _reconstruct_results(payload: dict) -> list[dict]:
     ]
 
 
+@contextmanager
+def reference_output_context(
+    run_dir: Path, detail: dict, *, create_dirs: bool = True
+) -> Iterator[None]:
+    """Redirect the reference implementation's output constants into
+    ``run_dir`` for the duration of the block, and mirror the run's
+    configuration (``N_RUNS`` / ``MAX_EVALS`` / ``ALPHA`` / ``TEST_CASES``)
+    onto the module so charts and the DOCX report describe the actual
+    experiment instead of the CLI defaults (the reference also reads
+    ``ALPHA`` at analysis time).
+
+    Serializes against concurrent exports and on-demand analyses: the patched
+    globals are process-wide state, so only one pipeline may run at a time.
+    """
+    import hyde_bench.run_benchmark as rb
+
+    with _export_lock:
+        original = (
+            rb.CSV_DIR,
+            rb.CHART_DIR,
+            rb.HERE,
+            rb.N_RUNS,
+            rb.MAX_EVALS,
+            rb.ALPHA,
+            rb.TEST_CASES,
+        )
+        rb.CSV_DIR = str(run_dir / "csv_data")
+        rb.CHART_DIR = str(run_dir / "benchmark_charts")
+        rb.HERE = str(run_dir)  # benchmark_report.docx destination
+        rb.N_RUNS = detail["n_runs"]
+        rb.MAX_EVALS = detail["max_evals"]
+        rb.ALPHA = detail["alpha"]
+        rb.TEST_CASES = [(tc["fname"], tc["dim"]) for tc in detail["test_cases"]]
+        if create_dirs:
+            Path(rb.CSV_DIR).mkdir(parents=True, exist_ok=True)
+            Path(rb.CHART_DIR).mkdir(parents=True, exist_ok=True)
+        try:
+            yield
+        finally:
+            (
+                rb.CSV_DIR,
+                rb.CHART_DIR,
+                rb.HERE,
+                rb.N_RUNS,
+                rb.MAX_EVALS,
+                rb.ALPHA,
+                rb.TEST_CASES,
+            ) = original
+
+
+# Renderer-geometry corruption inside the embedded app surfaces as these
+# recoverable failures; anything matching them is retried in a clean
+# subprocess instead of discarding the whole export.
+_RECOVERABLE_TOKENS = ("too large", "raster overflow", "bad_alloc")
+
+
+def is_recoverable_render_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(token in text for token in _RECOVERABLE_TOKENS)
+
+
+def _install_render_guard(log: Callable[[str], None]) -> None:
+    """Patch ``Figure.tight_layout`` and ``Figure.savefig`` once per process.
+
+    Inside the embedded app the renderer geometry can inflate by several
+    orders of magnitude (symptoms: "Image size of NNNxNNN pixels is too
+    large", then "FT_Render_Glyph: raster overflow"; MemoryError/std::
+    bad_alloc when the inflated buffer exceeds memory). ``tight_layout``
+    triggers the first render and compounds the inflation across figures
+    and export attempts, so it is skipped when it overflows, and savefig
+    retries without the ``bbox_inches='tight'`` pass after resetting the
+    figure's DPI to the reference implementation's intended value. The
+    plain render always fits the Agg 2^23-pixel limit; only the margins
+    are untightened. Steps whose plain render still fails are re-run in a
+    clean subprocess (see ``chart_worker``) by the export pipeline.
+
+    Offending artists and the observed DPI are dumped to the export log so
+    the underlying inflation can be diagnosed.
+    """
+    from matplotlib.figure import Figure
+
+    if getattr(Figure.savefig, "_suite_fallback", False):
+        return
+
+    orig_savefig = Figure.savefig
+    orig_tight_layout = Figure.tight_layout
+
+    def _recoverable(exc: BaseException) -> bool:
+        return is_recoverable_render_error(exc)
+
+    def dump_culprits(fig: Figure) -> None:
+        try:
+            import numpy as np
+
+            log(f"figure dpi={fig.dpi} size_inches={fig.get_size_inches()!r}")
+            renderer = fig.canvas.get_renderer()
+            for artist in fig.get_children():
+                bbox = artist.get_tightbbox(renderer)
+                if bbox is not None and (
+                    not np.isfinite(bbox.width)
+                    or not np.isfinite(bbox.height)
+                    or bbox.width > 1e4
+                    or bbox.height > 1e4
+                ):
+                    log(
+                        f"culprit artist {type(artist).__name__}: "
+                        f"bbox={bbox!r} visible={artist.get_visible()} "
+                        f"repr={artist!r}"
+                    )
+        except Exception:  # noqa: BLE001 - diagnostics must never mask the retry
+            pass
+
+    def tight_layout(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            return orig_tight_layout(self, *args, **kwargs)
+        except (ValueError, RuntimeError, MemoryError, OverflowError) as exc:
+            if not _recoverable(exc):
+                raise
+            log(f"tight_layout skipped after overflow: {exc}")
+            return None
+
+    def savefig(self, fname, *args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            return orig_savefig(self, fname, *args, **kwargs)
+        except (ValueError, RuntimeError, MemoryError, OverflowError) as exc:
+            if not _recoverable(exc):
+                raise
+            log(f"tight bbox overflow on {fname}: {exc}")
+            dump_culprits(self)
+            # The failing draw ran with an inflated figure geometry; reset
+            # it before rendering plainly.
+            self.set_dpi(100)
+            kwargs["bbox_inches"] = None
+            try:
+                return orig_savefig(self, fname, *args, **kwargs)
+            except (ValueError, RuntimeError, MemoryError, OverflowError) as exc2:
+                if not _recoverable(exc2):
+                    raise
+                log(f"fallback render also failed on {fname}: {exc2}")
+                raise
+
+    savefig._suite_fallback = True  # type: ignore[attr-defined]
+    Figure.savefig = savefig  # type: ignore[method-assign]
+    Figure.tight_layout = tight_layout  # type: ignore[method-assign]
+
+
+def _render_chart_subprocess(run_dir: Path, config: dict, fn_name: str, args: list) -> None:
+    """Run one ``hyde_bench.run_benchmark`` chart function in a fresh
+    interpreter so corrupted matplotlib state (inflated renderer geometry,
+    broken font caches) cannot affect the render."""
+    spec_path = run_dir / "chart_render_args.json"
+    _write_json(
+        spec_path,
+        {
+            "fn": fn_name,
+            "args": list(args),
+            "run_dir": str(run_dir),
+            "n_runs": config["n_runs"],
+            "max_evals": config["max_evals"],
+            "alpha": config["alpha"],
+            "test_cases": [{"fname": tc["fname"], "dim": tc["dim"]} for tc in config["test_cases"]],
+        },
+    )
+    # a fresh MPLCONFIGDIR protects against corrupted font caches as well;
+    # PYTHONNOUSERSITE keeps the child from silently resolving different
+    # package versions, while PYTHONPATH pins the parent's resolved import
+    # path (dev environments may legitimately resolve the project from a
+    # location that would otherwise be dropped without user site)
+    mpl_cfg = run_dir / "mpl_config"
+    mpl_cfg.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "PYTHONNOUSERSITE": "1",
+        "MPLBACKEND": "Agg",
+        "MPLCONFIGDIR": str(mpl_cfg),
+        "PYTHONPATH": os.pathsep.join(dict.fromkeys(p for p in sys.path if p and os.path.isdir(p))),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "suite.chart_worker", "--args", str(spec_path)],
+        capture_output=True,
+        text=True,
+        timeout=CHART_SUBPROCESS_TIMEOUT,
+        env=env,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr.strip() or proc.stdout.strip())[-4000:]
+        raise RuntimeError(
+            f"clean-subprocess render of {fn_name} failed (exit {proc.returncode}): {detail}"
+        )
+
+
 def run_exports_sync(
     run_id: str,
     svc: RunService,
@@ -216,29 +419,69 @@ def run_exports_sync(
     """Execute the export pipeline synchronously and return artifact paths."""
     report = progress or (lambda _msg: None)
 
-    import matplotlib
-
-    matplotlib.use("Agg")  # desktop app has no display-bound pyplot
-
-    import hyde_bench.run_benchmark as rb
-
     detail = svc.get_run_detail(run_id)
+    if detail["status"] == "running":
+        raise RuntimeError("run is still in progress; wait for it to finish before exporting")
     run_dir = Path(detail["output_dir"])
     all_results = load_results(run_dir)
 
+    def log(msg: str) -> None:
+        try:
+            with open(run_dir / "export_error.log", "a", encoding="utf-8") as f:
+                f.write(f"--- {msg} ---\n")
+        except OSError:
+            pass
+
+    import matplotlib
+
+    matplotlib.use("Agg")  # desktop app has no display-bound pyplot
+    import matplotlib.pyplot as plt
+
+    # failed export attempts in the same app session leave their figures
+    # registered in the global pyplot state; clear them so this run starts
+    # from a clean slate
+    plt.close("all")
+    if plt.rcParams["figure.dpi"] != 100:
+        log(f"figure.dpi rc drifted to {plt.rcParams['figure.dpi']!r}; resetting for export")
+        plt.rcParams["figure.dpi"] = 100
+    _install_render_guard(log)
+
+    import hyde_bench.run_benchmark as rb
+
     artifacts: dict[str, list[str]] = {group: [] for group in groups}
+    failures: list[str] = []
 
-    # Redirect reference-module outputs into the run directory.
-    original_csv = rb.CSV_DIR
-    original_chart = rb.CHART_DIR
-    original_here = rb.HERE
-    rb.CSV_DIR = str(run_dir / "csv_data")
-    rb.CHART_DIR = str(run_dir / "benchmark_charts")
-    rb.HERE = str(run_dir)  # benchmark_report.docx destination
-    Path(rb.CSV_DIR).mkdir(parents=True, exist_ok=True)
-    Path(rb.CHART_DIR).mkdir(parents=True, exist_ok=True)
+    def guarded(step: str, fn: Callable[[], None]) -> Exception | None:
+        """Run one export step; on failure record it (with full traceback
+        persisted next to the run) and return the exception so callers can
+        decide on a fallback, while everything else keeps going so one
+        broken chart or payload never discards everything else."""
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 - reported to the UI/log
+            tb = traceback.format_exc()
+            try:
+                with open(run_dir / "export_error.log", "a", encoding="utf-8") as f:
+                    f.write(f"--- {step} ---\n{tb}\n")
+            except OSError:
+                pass
+            failures.append(f"{step}: {exc}")
+            return exc
+        return None
 
-    try:
+    def _guarded_per_run(sr: dict) -> None:
+        def write() -> None:
+            payload = read_payload(Path(sr["payloads_path"]))
+            results = _reconstruct_results(payload)
+            rb.save_per_run_csv(sr["algo_key"], sr["fname"], sr["dim"], results)
+            # a single payload holds ~2.5M parsed floats (full per-eval
+            # histories); release it before reading the next one so the
+            # sequential reads do not accumulate resident memory
+            del payload, results
+
+        guarded(f"save_per_run_csv[{sr['fname']}_{sr['dim']}D/{sr['algo_key']}]", write)
+
+    with reference_output_context(run_dir, detail):
         if "json" in groups:
             # written incrementally by the runner; verified present above
             artifacts["json"].append(str(run_dir / "benchmark_results.json"))
@@ -255,55 +498,126 @@ def run_exports_sync(
         scaling_results = analysis_summary["scaling"]
 
         # Persist a JSON snapshot of the statistical analyses so the UI can
-        # render them without recomputation.
+        # render them without recomputation. It backs the analysis view even
+        # when the json group was not requested, but is only listed as an
+        # artifact under that group.
         _write_json(run_dir / "analysis_summary.json", analysis_summary)
-        artifacts.setdefault("json", []).append(
-            str(run_dir / "analysis_summary.json")
-        )
+        if "json" in groups:
+            artifacts["json"].append(str(run_dir / "analysis_summary.json"))
 
         if "csv" in groups:
             report("per-run and analysis CSVs")
             for sr in detail["scenario_results"]:
-                payload = read_payload(Path(sr["payloads_path"]))
-                results = _reconstruct_results(payload)
-                rb.save_per_run_csv(sr["algo_key"], sr["fname"], sr["dim"], results)
-            rb.save_summary_csv(all_results)
-            rb.save_raw_costs_csv(all_results)
-            rb.save_qa_csv(friedman_obj, kruskal_results)
-            rb.save_qb_csv(cochran_result, chi2_conv_results)
-            rb.save_qc_csv(friedman_wt, wt_kruskal_results)
-            rb.save_qd_csv(margin_results)
-            rb.save_qe_csv(scaling_results)
-            artifacts["csv"].append(str(rb.CSV_DIR))
+                _guarded_per_run(sr)
+            gc.collect()
+            guarded(
+                "analysis CSVs",
+                lambda: (
+                    rb.save_summary_csv(all_results),
+                    rb.save_raw_costs_csv(all_results),
+                    rb.save_qa_csv(friedman_obj, kruskal_results),
+                    rb.save_qb_csv(cochran_result, chi2_conv_results),
+                    rb.save_qc_csv(friedman_wt, wt_kruskal_results),
+                    rb.save_qd_csv(margin_results),
+                    rb.save_qe_csv(scaling_results),
+                ),
+            )
+            csv_dir = Path(rb.CSV_DIR)
+            if not (csv_dir / "benchmark_summary.csv").exists():
+                raise RuntimeError("CSV summary was not produced")
+            artifacts["csv"].append(str(csv_dir))
 
-        if "charts" in groups:
-            report("matplotlib charts")
-            rb.make_charts(all_results, kruskal_results, margin_results)
+        # The DOCX report embeds PNG charts from the chart directory; the
+        # reference CLI always renders them first, so a chart-less selection
+        # would silently produce a figure-less report.
+        chart_dir = Path(rb.CHART_DIR)
+        needs_charts = "charts" in groups
+        needs_docx = "docx" in groups
+
+        def _normalize_dpi() -> None:
+            # renderer geometry has been observed inflating between chart
+            # functions inside the app; detect and reset it before each one
+            if plt.rcParams["figure.dpi"] != 100:
+                log(
+                    f"figure.dpi drifted to {plt.rcParams['figure.dpi']!r} "
+                    "between chart functions; resetting"
+                )
+                plt.rcParams["figure.dpi"] = 100
+
+        def chart_step(step: str, fn_name: str, *args) -> None:
+            """Render one chart step in-process; if the renderer geometry
+            corruption makes even the plain-bbox fallback fail, re-run the
+            same reference function in a clean subprocess so the chart is
+            still produced."""
+            _normalize_dpi()
+            err = guarded(step, lambda: getattr(rb, fn_name)(*args))
+            if err is None or not is_recoverable_render_error(err):
+                return
+            log(f"re-rendering {fn_name} in clean subprocess")
+            report(f"{step}: re-rendering in clean subprocess")
+            idx = len(failures) - 1
+            retry_err = guarded(
+                f"{step} (clean subprocess)",
+                lambda: _render_chart_subprocess(run_dir, detail, fn_name, list(args)),
+            )
+            if retry_err is None:
+                # the in-process failure was fully recovered by the
+                # subprocess render; do not surface it as an export failure
+                del failures[idx]
+
+        if needs_charts or (needs_docx and not any(chart_dir.glob("*.png"))):
+            if needs_charts:
+                report("matplotlib charts")
+            chart_step(
+                "make_charts",
+                "make_charts",
+                all_results,
+                kruskal_results,
+                margin_results,
+            )
             if scaling_results:
                 # reduced runs without 25D scenarios produce no scaling data
-                rb.make_scaling_chart(scaling_results)
-            rb.make_cost_charts(all_results)
-            rb.make_convergence_charts(all_results)
-            rb.make_figure5_curves(all_results)
-            rb.make_bootstrap_ci_chart(margin_results)
-            artifacts["charts"].append(str(rb.CHART_DIR))
+                chart_step("make_scaling_chart", "make_scaling_chart", scaling_results)
+            chart_step("make_cost_charts", "make_cost_charts", all_results)
+            chart_step("make_convergence_charts", "make_convergence_charts", all_results)
+            chart_step("make_figure5_curves", "make_figure5_curves", all_results)
+            chart_step("make_bootstrap_ci_chart", "make_bootstrap_ci_chart", margin_results)
+            if needs_charts:
+                if not any(chart_dir.glob("*.png")):
+                    raise RuntimeError(
+                        "no chart PNGs were produced: " + ("; ".join(failures) or "unknown cause")
+                    )
+                artifacts["charts"].append(str(chart_dir))
 
-        if "docx" in groups:
+        if needs_docx:
             report("DOCX report")
-            rb.generate_docx_report(
-                all_results,
-                friedman_obj,
-                kruskal_results,
-                cochran_result,
-                chi2_conv_results,
-                friedman_wt,
-                margin_results,
-                scaling_results,
+            guarded(
+                "generate_docx_report",
+                lambda: rb.generate_docx_report(
+                    all_results,
+                    friedman_obj,
+                    kruskal_results,
+                    cochran_result,
+                    chi2_conv_results,
+                    friedman_wt,
+                    margin_results,
+                    scaling_results,
+                ),
             )
-            artifacts["docx"].append(str(run_dir / "benchmark_report.docx"))
-    finally:
-        rb.CSV_DIR = original_csv
-        rb.CHART_DIR = original_chart
-        rb.HERE = original_here
+            docx_path = run_dir / "benchmark_report.docx"
+            if not docx_path.exists() or docx_path.stat().st_size == 0:
+                raise RuntimeError(
+                    "DOCX report was not produced: " + ("; ".join(failures) or "unknown cause")
+                )
+            artifacts["docx"].append(str(docx_path))
+
+    if failures:
+        # artifacts written so far stay on disk, but the UI must not show a
+        # clean success when steps failed
+        raise RuntimeError(
+            "export finished with failures ("
+            + "; ".join(failures)
+            + "); details in export_error.log"
+        )
 
     return artifacts

@@ -428,8 +428,6 @@ async def get_analysis(
     import asyncio
     from pathlib import Path
 
-    from .exports import compute_analysis_summary, load_results
-
     try:
         detail = state.svc.get_run_detail(body.run_id)
     except KeyError as exc:
@@ -438,10 +436,16 @@ async def get_analysis(
     cached = run_dir / "analysis_summary.json"
     if cached.exists():
         return json.loads(cached.read_text(encoding="utf-8"))
-    # scipy/bootstrap computations are CPU-bound; run them off the loop.
-    return await asyncio.to_thread(
-        compute_analysis_summary, load_results(run_dir)
-    )
+    # scipy/bootstrap computations are CPU-bound and mutate the reference
+    # module's globals (run configuration mirror); run them off the loop,
+    # serialized against concurrent exports, without creating export dirs.
+    from .exports import compute_analysis_summary, load_results, reference_output_context
+
+    def _compute() -> dict[str, Any]:
+        with reference_output_context(run_dir, detail, create_dirs=False):
+            return compute_analysis_summary(load_results(run_dir))
+
+    return await asyncio.to_thread(_compute)
 
 
 @commands.command()

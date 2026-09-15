@@ -47,9 +47,14 @@ fi
 
 # --- 2. Install the project into the embedded interpreter ------------------
 export PYTAURI_STANDALONE=1
+# setuptools' incremental build dir and uv's wheel cache have both served
+# stale copies of the project after source-only changes (same version,
+# different code); clear them so the bundle always matches the repo.
+rm -rf "${REPO_ROOT}/build"
 echo "Installing ${PY_PROJECT_NAME} into the embedded Python ..."
 uv pip install \
   --python "${PYEMBED_BIN}" \
+  --no-cache \
   --reinstall-package="${PY_PROJECT_NAME}" \
   "${REPO_ROOT}"
 

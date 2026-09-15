@@ -167,6 +167,7 @@ export default function RunDetail({
       ][0] ?? null,
     );
     setRenameLabel(detail.label);
+    setLastArtifacts(null);
   }, [detail]);
 
   useEffect(() => {
@@ -203,17 +204,27 @@ export default function RunDetail({
   }, [detail, scenarioKey]);
 
   // export events
+  // keep the active run id in a ref so the (mount-once) listeners only
+  // accept export events belonging to the run shown in this pane
+  const detailIdRef = useRef(detail.id);
+  detailIdRef.current = detail.id;
   useEffect(() => {
     const unlisteners: Array<Promise<() => void>> = [
-      subscribeValidated("export://progress", exportProgressEventSchema, (p) =>
-        toast.info(p.message),
+      subscribeValidated(
+        "export://progress",
+        exportProgressEventSchema,
+        (p) => {
+          if (p.run_id === detailIdRef.current) toast.info(p.message);
+        },
       ),
       subscribeValidated("export://done", exportDoneEventSchema, (p) => {
+        if (p.run_id !== detailIdRef.current) return;
         setLastArtifacts(p.artifacts);
         setExportBusy(false);
         toast.success("Export finished");
       }),
       subscribeValidated("export://error", exportErrorEventSchema, (p) => {
+        if (p.run_id !== detailIdRef.current) return;
         setExportBusy(false);
         toast.error(`Export failed: ${p.error}`);
       }),

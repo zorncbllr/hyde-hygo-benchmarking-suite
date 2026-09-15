@@ -12,6 +12,15 @@ use tauri::utils::platform::resource_dir;
 use benchsuite_lib::{ext_mod, tauri_generate_context};
 
 fn main() -> Result<Infallible, Box<dyn Error>> {
+    // The embedded interpreter must never resolve packages from the user's
+    // `~/.local/lib/pythonX.Y/site-packages`: user site precedes the bundled
+    // site-packages in sys.path, so a user-level matplotlib/numpy silently
+    // shadows the pinned bundle versions (mixed-ABI franken-install). That
+    // corrupted state is what inflates matplotlib renderer geometry inside
+    // the app ("Image size ... too large", "FT_Render_Glyph ... raster
+    // overflow").
+    std::env::set_var("PYTHONNOUSERSITE", "1");
+
     let py_env = if cfg!(dev) {
         // `cfg(dev)` is set by `tauri-build` in `build.rs`, which means running with `tauri dev`,
         // see: <https://github.com/tauri-apps/tauri/pull/8937>.
