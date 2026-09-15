@@ -7,7 +7,6 @@ tests guard the contract that the UI mirrors the exported DOCX report.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 

@@ -18,6 +18,12 @@ name = "benchsuite"
 path = "src/main.rs"
 required-features = ["pytauri/standalone"]
 
+[profile.bundle-dev]
+inherits = "dev"
+
+[profile.bundle-release]
+inherits = "release"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

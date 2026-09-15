@@ -19,3 +19,6 @@ data/
 
 # Local env
 .env
+
+# Embedded portable Python distribution for standalone builds
+src-tauri/pyembed/

@@ -63,7 +63,6 @@ def test_module_constants_restored(completed_run):
 def test_payload_shape_matches_frontend_schema(completed_run):
     """The persisted payload must contain every field the frontend zod
     scenarioPayloadSchema requires (drift broke charts before)."""
-    from suite.schemas import RunDetailResponse
 
     svc, run_id, run_dir = completed_run
     detail = RunDetailResponse(**svc.get_run_detail(run_id))

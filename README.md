@@ -45,8 +45,8 @@ The app has three pages:
 src/hyde_bench/   vendored benchmark code (reference copy + progress_hook telemetry)
 src/suite/        pytauri app (commands, runner, exports, telemetry, simulation)
   suite/db/       SQLAlchemy models, run service (CRUD + batch), zstd payloads
+  suite/alembic/  migrations (packaged so installed builds can migrate their DB)
   suite/app.py    pytauri wiring (only pytauri-dependent module)
-alembic/          migrations
 src-tauri/        Rust bootstrap (pytauri standalone) + tauri config
 ui/               React + TS + Tailwind v4 + shadcn/ui frontend
 tests/            pytest suite (unit + integration + parity regression)
@@ -100,17 +100,29 @@ bun run build    # production build
 
 ```bash
 source .venv/bin/activate
-cd ui && bun run tauri build
+./scripts/build-standalone.sh
 ```
 
-This bundles the standalone Rust binary with an embedded Python
-distribution. See the pytauri "Build Standalone Binary" tutorial for
-platform-specific options.
+The script follows the pytauri "Build Standalone Binary" tutorial:
+
+1. fetches a portable python-build-standalone distribution into
+   `src-tauri/pyembed` (cached across runs; use `--clean` to reset),
+2. installs the Python project and its dependencies into the embedded
+   interpreter (rerun after Python code changes),
+3. compiles the Rust binary against the embedded interpreter and bundles it
+   with the portable Python via `tauri build --config
+   src-tauri/tauri.bundle.json`.
+
+Do not use a plain `bun run tauri build`: it produces a binary that links
+the system Python and ships without the bundled interpreter resources, which
+crashes on startup with `Failed to import encodings module`. See the pytauri
+tutorial for platform-specific options.
 
 ## Configuration
 
 Copy `.env.example` to `.env`:
 
 - `SUITE_DATA_DIR`: root for the database, run artifacts and exports
-  (default: `<repo>/data`).
+  (default: `<repo>/data` in a source checkout,
+  `~/.local/share/hyde-hygo-benchmark-suite` for installed builds).
 - `LOG_LEVEL`: application log level.

@@ -1,0 +1,455 @@
+import bisect
+
+import numpy as np
+
+from hyde_bench.benchmarks import converged, get_bounds
+
+
+class HyDEBin:
+    """
+    HyDE-bin: Binary encoding variant of Hybrid Differential Evolution.
+
+    Phase 1 — DE/current-to-best/1/bin with 12-bit binary encoding (60% budget)
+      Each parameter is a 12-bit binary string (4096 discrete values).
+      DE mutation operates on decoded continuous values, then re-encodes
+      to binary after each generation.
+      Stagnation recovery: random bit-flip perturbation on worst N/2.
+
+    Phase 2 — IPOP-CMA-ES with warm covariance (40% budget)
+      Initial covariance seeded from archive scatter.
+      Population doubles on each restart (IPOP).
+    """
+
+    def __init__(self, func, fname, dim, pop_size=None, max_gen=50,
+                 max_evals=50000, phase_split=0.60, Nb=12, seed=None,
+                 progress_hook=None, **kwargs):
+        self.func = func
+        self.fname = fname
+        self.dim = dim
+        self.pop_size = pop_size or max(50, 3 * dim)
+        self.max_gen = max_gen
+        self.max_evals = max_evals
+        self.Nb = Nb
+        self.n_vals = 2 ** Nb
+        self.rng = np.random.default_rng(seed)
+        self.lo, self.hi = get_bounds(fname, dim)
+        self.width = self.hi - self.lo
+        self._p1_budget = int(np.floor(max_evals * phase_split))
+        self.eval_count = 0
+        self.best_cost = np.inf
+        self.best_x = None
+        self.cost_history = []
+        self.gen_best = []
+        self._arc = []
+        self._arc_max = max(dim + 2, 30)
+        self.progress_hook = progress_hook
+        self._pending_ops = None
+
+    def _emit_progress(self, phase, gen, positions=None, ops=None):
+        """Emit a read-only snapshot to the progress hook, if installed.
+
+        Never mutates algorithm state and does not touch the RNG, so runs
+        with ``progress_hook=None`` are byte-identical to uninstrumented code.
+        ``ops`` carries operator-level geometry (decision space) for the
+        simulation visualizer; it is only populated when the hook is set
+        and ``dim == 2``.
+        """
+        hook = self.progress_hook
+        if hook is None:
+            return
+        snap = {
+            'phase': phase,
+            'gen': gen,
+            'eval_count': int(self.eval_count),
+            'best_cost': float(self.best_cost),
+            'gen_best': float(self.gen_best[-1]) if self.gen_best else None,
+            'gen_best_tail': [float(c) for c in self.gen_best[-64:]],
+            'best_pos': (
+                [float(self.best_x[0]), float(self.best_x[1])]
+                if self.best_x is not None and self.dim == 2
+                else None
+            ),
+        }
+        if positions is not None and self.dim == 2:
+            p = np.asarray(positions, dtype=float)[:200]
+            snap['positions'] = [[float(px), float(py)] for px, py in p]
+        else:
+            snap['positions'] = None
+        snap['ops'] = ops
+        hook(snap)
+
+    def _pt(self, x):
+        """2D point as plain floats for the ops payload."""
+        return [float(x[0]), float(x[1])]
+
+    # -- Encoding -----------------------------------------------------------
+
+    def _encode(self, x):
+        """Real vector -> binary chromosome (flat array of 0/1)."""
+        idx = np.round((x - self.lo) / self.width * (self.n_vals - 1)).astype(int)
+        idx = np.clip(idx, 0, self.n_vals - 1)
+        chrom = np.zeros(self.dim * self.Nb, dtype=np.int8)
+        for i, v in enumerate(idx):
+            for b in range(self.Nb):
+                chrom[i * self.Nb + (self.Nb - 1 - b)] = (v >> b) & 1
+        return chrom
+
+    def _decode(self, chrom):
+        """Binary chromosome -> real vector."""
+        x = np.zeros(self.dim)
+        for i in range(self.dim):
+            val = 0
+            for b in range(self.Nb):
+                val = (val << 1) | int(chrom[i * self.Nb + b])
+            x[i] = self.lo[i] + val / (self.n_vals - 1) * self.width[i]
+        return x
+
+    # -- Evaluation ---------------------------------------------------------
+
+    def _eval(self, x):
+        cost = float(self.func(x))
+        self.eval_count += 1
+        if cost < self.best_cost:
+            self.best_cost = cost
+            self.best_x = x.copy()
+        self.cost_history.append(self.best_cost)
+        cs = [c for c, _ in self._arc]
+        pos = bisect.bisect_left(cs, cost)
+        self._arc.insert(pos, (cost, x.copy()))
+        if len(self._arc) > self._arc_max:
+            self._arc.pop()
+        return cost
+
+    def _eval_pop(self, xs):
+        xs = np.clip(xs, self.lo, self.hi)
+        return np.array([self._eval(x) for x in xs])
+
+    # -- LHS init with farthest-point reordering ----------------------------
+
+    def _init_pop(self, N):
+        # LHS in decision space
+        samples = np.zeros((N, self.dim))
+        for d in range(self.dim):
+            perm = self.rng.permutation(N)
+            samples[:, d] = self.lo[d] + (perm + self.rng.random(N)) / N * self.width[d]
+
+        if self.progress_hook is not None and self.dim == 2:
+            self._emit_progress('init', 0, samples, {
+                'type': 'lhs', 'strata': N, 'reorder': N > 4, 'stage': 'sample',
+                'levels': int(self.n_vals),
+            })
+
+        # Farthest-point reordering
+        if N > 4:
+            sel = [0]
+            dists = np.full(N, np.inf)
+            for step in range(N - 1):
+                d2 = np.sum((samples - samples[sel[-1]]) ** 2, axis=1)
+                dists = np.minimum(dists, d2)
+                sel.append(int(np.argmax(dists)))
+                if self.progress_hook is not None and self.dim == 2:
+                    # One snapshot per greedy step: the full pool in
+                    # original order, the visit sequence so far and each
+                    # sample's min-distance to the selected set.
+                    self._emit_progress('init', 0, samples, {
+                        'type': 'lhs',
+                        'strata': N,
+                        'reorder': True,
+                        'stage': 'reorder',
+                        'levels': int(self.n_vals),
+                        'step': int(step + 1),
+                        'order': [int(i) for i in sel],
+                        'dists': [float(d) for d in dists],
+                        'last': int(sel[-1]),
+                    })
+            samples = samples[sel]
+
+        # Encode to binary
+        chroms = [self._encode(x) for x in samples]
+        # Decode back (snaps to grid)
+        pop_x = np.array([self._decode(c) for c in chroms])
+        fitness = self._eval_pop(pop_x)
+        return chroms, pop_x, fitness
+
+    # -- DE/current-to-best/1/bin (operates on decoded continuous, re-encodes)
+
+    def _de_gen(self, chroms, pop_x, fitness):
+        N = len(fitness)
+        dim = self.dim
+        best_x = pop_x[int(np.argmin(fitness))]
+
+        F = 0.5 + 0.3 * self.rng.random(N)
+        cr = 0.9 if dim > 5 else 0.5
+
+        r1 = self.rng.integers(0, N, N)
+        r2 = self.rng.integers(0, N, N)
+        for i in range(N):
+            while r1[i] == i:
+                r1[i] = self.rng.integers(0, N)
+            while r2[i] == i or r2[i] == r1[i]:
+                r2[i] = self.rng.integers(0, N)
+
+        # DE mutation in continuous space
+        mutants = pop_x + F[:, None] * (best_x - pop_x) \
+                        + F[:, None] * (pop_x[r1] - pop_x[r2])
+        mutants = np.clip(mutants, self.lo, self.hi)
+
+        trace_ops = self.progress_hook is not None and self.dim == 2
+        if trace_ops:
+            # capture the exact inputs the mutation used; selection below
+            # replaces population rows in-place
+            pre_pop = pop_x.copy()
+            de_best = best_x.copy()
+
+        # Binomial crossover
+        mask = self.rng.random((N, dim)) < cr
+        mask[np.arange(N), self.rng.integers(0, dim, N)] = True
+        children_x = np.where(mask, mutants, pop_x)
+
+        n_ev = min(N, self.max_evals - self.eval_count)
+        if n_ev <= 0:
+            return chroms, pop_x, fitness
+
+        child_f = self._eval_pop(children_x[:n_ev])
+        better = child_f <= fitness[:n_ev]
+        for i in range(n_ev):
+            if better[i]:
+                pop_x[i] = children_x[i]
+                fitness[i] = child_f[i]
+                chroms[i] = self._encode(children_x[i])
+
+        if trace_ops:
+            # Full operator chain for a few individuals spread across the
+            # population: mutation inputs, crossover child, selection.
+            idxs = np.linspace(0, n_ev - 1, min(6, n_ev)).astype(int)
+            self._pending_ops = {
+                'type': 'mutation',
+                'samples': [
+                    {
+                        'x': self._pt(pre_pop[i]),
+                        'best': self._pt(de_best),
+                        'r1': self._pt(pre_pop[r1[i]]),
+                        'r2': self._pt(pre_pop[r2[i]]),
+                        'f': float(F[i]),
+                        'child': self._pt(children_x[i]),
+                        'accepted': bool(better[i]),
+                    }
+                    for i in idxs
+                ],
+            }
+
+        return chroms, pop_x, fitness
+
+    # -- Stagnation recovery: random bit-flip perturbation ------------------
+
+    def _recover(self, chroms, pop_x, fitness):
+        N = len(fitness)
+        n_t = max(1, N // 2)
+        worst = np.argsort(fitness)[-n_t:]
+
+        trace_ops = self.progress_hook is not None and self.dim == 2
+        before = pop_x[worst].copy() if trace_ops else None
+
+        for idx in worst:
+            c = chroms[idx].copy()
+            # Flip random bits (expected ~1 bit per parameter)
+            for p in range(self.dim):
+                bit_idx = p * self.Nb + self.rng.integers(0, self.Nb)
+                c[bit_idx] ^= 1
+            chroms[idx] = c
+            pop_x[idx] = self._decode(c)
+
+        if trace_ops:
+            self._pending_ops = {
+                'type': 'bitflip',
+                'moves': [
+                    {'from': self._pt(b), 'to': self._pt(a)}
+                    for b, a in zip(before, pop_x[worst])
+                ],
+            }
+
+        n_ev = min(n_t, self.max_evals - self.eval_count)
+        if n_ev > 0:
+            fitness[worst[:n_ev]] = self._eval_pop(pop_x[worst[:n_ev]])
+        return chroms, pop_x, fitness
+
+    # -- IPOP-CMA-ES with warm covariance -----------------------------------
+
+    def _cmaes(self, budget):
+        dim = self.dim
+        if not self._arc:
+            return
+
+        lam_base = max(4 + int(3 * np.log(dim)), min(4 * dim, 40))
+
+        arc_xs = np.array([x for _, x in self._arc])
+        C_warm = None
+        if len(arc_xs) > dim + 1:
+            C_warm = np.cov(arc_xs.T)
+            tr = max(np.trace(C_warm), 1e-30)
+            C_warm = 0.5 * C_warm + 0.5 * np.eye(dim) * (tr / dim)
+
+        global_sig = float(np.clip(
+            np.mean(np.std(arc_xs, axis=0)) if len(arc_xs) > 1
+            else np.min(self.width) * 0.2,
+            1e-6, np.max(self.width) * 0.5))
+
+        used, lam, restart = 0, lam_base, 0
+
+        while used < budget and self.eval_count < self.max_evals and restart < 6:
+            mu = lam // 2
+            raw_w = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
+            w = raw_w / raw_w.sum()
+            mueff = 1.0 / np.sum(w ** 2)
+            cs = (mueff + 2) / (dim + mueff + 5)
+            ds = 1 + 2 * max(0, np.sqrt((mueff - 1) / (dim + 1)) - 1) + cs
+            chi = np.sqrt(dim) * (1 - 1 / (4 * dim) + 1 / (21 * dim ** 2))
+            cc = (4 + mueff / dim) / (dim + 4 + 2 * mueff / dim)
+            c1 = 2 / ((dim + 1.3) ** 2 + mueff)
+            cmu = min(1 - c1,
+                      2 * (mueff - 2 + 1 / mueff) / ((dim + 2) ** 2 + mueff))
+
+            idx = min(restart, len(self._arc) - 1)
+            mean = self._arc[idx][1].copy()
+            sig = max(global_sig * (0.5 ** restart),
+                      float(np.min(self.width)) * 1e-3)
+            C = C_warm.copy() if (C_warm is not None and restart == 0) \
+                else np.eye(dim)
+            pc = np.zeros(dim)
+            ps = np.zeros(dim)
+            gen = 0
+
+            while used < budget and self.eval_count < self.max_evals:
+                try:
+                    ev, B = np.linalg.eigh(C)
+                    ev = np.maximum(ev, 1e-20)
+                    D = np.sqrt(ev)
+                except np.linalg.LinAlgError:
+                    C = np.eye(dim); D = np.ones(dim); B = np.eye(dim)
+
+                if min(budget - used, self.max_evals - self.eval_count) < lam:
+                    break
+
+                Z = self.rng.standard_normal((lam, dim))
+                X = np.clip(mean + sig * (Z * D) @ B.T, self.lo, self.hi)
+                costs = self._eval_pop(X)
+                used += lam; gen += 1
+
+                order = np.argsort(costs)
+                X_sel = X[order[:mu]]
+                mean_old = mean.copy()
+                mean = w @ X_sel
+
+                invsqC = B @ np.diag(1.0 / D) @ B.T
+                st = (mean - mean_old) / sig
+                ps = ((1 - cs) * ps
+                      + np.sqrt(cs * (2 - cs) * mueff) * (invsqC @ st))
+                hs = (np.linalg.norm(ps)
+                      / np.sqrt(max(1e-300, 1 - (1 - cs) ** (2 * gen)))
+                      / chi) < 1.4 + 2 / (dim + 1)
+                pc = ((1 - cc) * pc
+                      + hs * np.sqrt(cc * (2 - cc) * mueff) * st)
+                artmp = (X_sel - mean_old) / sig
+                C = ((1 - c1 - cmu) * C
+                     + c1 * (np.outer(pc, pc)
+                             + (1 - hs) * cc * (2 - cc) * C)
+                     + cmu * (w[:, None] * artmp).T @ artmp)
+                sig *= np.exp((cs / ds) * (np.linalg.norm(ps) / chi - 1))
+                sig = float(np.clip(sig, 1e-12, np.max(self.width)))
+
+                if self.progress_hook is not None and self.dim == 2:
+                    # Live sampling distribution: mean + covariance axes
+                    # (1-sigma ellipse basis = sigma * B_k * D_k), the
+                    # mean shift and the best-mu rank selection flags
+                    # (aligned with the offspring positions).
+                    sel_flags = [False] * len(X)
+                    for k in range(mu):
+                        sel_flags[int(order[k])] = True
+                    self._emit_progress('cmaes', None, X, {
+                        'type': 'cmaes',
+                        'mean': self._pt(mean),
+                        'mean_old': self._pt(mean_old),
+                        'axes': [
+                            self._pt(B[:, k] * D[k] * sig) for k in range(dim)
+                        ],
+                        'sigma': float(sig),
+                        'restart': int(restart),
+                        'sel_flags': sel_flags,
+                    })
+
+                if sig < 1e-11 or not np.isfinite(sig) \
+                        or not np.all(np.isfinite(C)):
+                    break
+
+            restart += 1
+            lam = min(lam * 2, budget - used)
+            if lam < 4:
+                break
+
+    # -- Main run -----------------------------------------------------------
+
+    def run(self):
+        N = self.pop_size
+        conv_gen = None
+
+        chroms, pop_x, fitness = self._init_pop(N)
+        self.gen_best.append(self.best_cost)
+        self._emit_progress('init', 0, pop_x, {
+            'type': 'lhs',
+            'strata': N,
+            'reorder': N > 4,
+            'stage': 'final',
+            'levels': int(self.n_vals),
+        })
+
+        stag = 0
+        prev_best = self.best_cost
+
+        for g in range(1, self.max_gen + 1):
+            if self.eval_count >= min(self._p1_budget, self.max_evals):
+                break
+
+            chroms, pop_x, fitness = self._de_gen(chroms, pop_x, fitness)
+            de_ops = self._pending_ops
+            self._pending_ops = None
+            if self.eval_count >= self.max_evals:
+                break
+
+            if self.best_cost < prev_best - 1e-12:
+                stag = 0; prev_best = self.best_cost
+            else:
+                stag += 1
+
+            if stag >= 3:
+                chroms, pop_x, fitness = self._recover(chroms, pop_x, fitness)
+                stag = 0
+                if self._pending_ops is not None:
+                    self._emit_progress('recover', g, pop_x, self._pending_ops)
+                    self._pending_ops = None
+                if self.eval_count >= self.max_evals:
+                    break
+
+            self.gen_best.append(self.best_cost)
+            self._emit_progress('de', g, pop_x, de_ops)
+            if conv_gen is None and converged(self.fname, self.best_cost, self.dim):
+                conv_gen = g
+
+        if self.eval_count < self.max_evals and self._arc:
+            self._cmaes(self.max_evals - self.eval_count)
+            self.gen_best.append(self.best_cost)
+            self._pending_ops = None
+            self._emit_progress('cmaes', None, None)
+
+        while len(self.gen_best) <= self.max_gen:
+            self.gen_best.append(self.best_cost)
+        if conv_gen is None and converged(self.fname, self.best_cost, self.dim):
+            conv_gen = self.max_gen
+
+        return {
+            'best_cost': self.best_cost,
+            'best_x': self.best_x,
+            'evals': self.eval_count,
+            'conv_gen': conv_gen,
+            'gen_best': self.gen_best,
+            'cost_history': self.cost_history,
+        }
