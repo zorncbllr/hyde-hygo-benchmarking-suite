@@ -283,6 +283,51 @@ class TestBatch:
             svc.delete_runs([])
 
 
+class TestArtifactDirGuard:
+    def test_run_dir_inside_runs_root_is_deletable(self, tmp_path):
+        from suite.artifacts import split_deletable_artifact_dirs
+
+        runs_dir = tmp_path / "runs"
+        run_dir = runs_dir / "20260915_143627_50x20"
+        run_dir.mkdir(parents=True)
+        deletable, skipped = split_deletable_artifact_dirs([str(run_dir)], runs_dir)
+        assert deletable == [str(run_dir)]
+        assert skipped == []
+
+    def test_dir_outside_runs_root_is_skipped(self, tmp_path):
+        from suite.artifacts import split_deletable_artifact_dirs
+
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir()
+        outside = tmp_path / "elsewhere" / "run1"
+        outside.mkdir(parents=True)
+        deletable, skipped = split_deletable_artifact_dirs([str(outside)], runs_dir)
+        assert deletable == []
+        assert skipped == [str(outside)]
+
+    def test_runs_root_itself_is_never_deletable(self, tmp_path):
+        from suite.artifacts import split_deletable_artifact_dirs
+
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir()
+        deletable, skipped = split_deletable_artifact_dirs([str(runs_dir)], runs_dir)
+        assert deletable == []
+        assert skipped == [str(runs_dir)]
+
+    def test_symlink_escaping_runs_root_is_skipped(self, tmp_path):
+        from suite.artifacts import split_deletable_artifact_dirs
+
+        runs_dir = tmp_path / "runs"
+        outside = tmp_path / "precious"
+        outside.mkdir(parents=True)
+        runs_dir.mkdir()
+        link = runs_dir / "sneaky"
+        link.symlink_to(outside)
+        deletable, skipped = split_deletable_artifact_dirs([str(link)], runs_dir)
+        assert deletable == []
+        assert skipped == [str(link)]
+
+
 class TestDuplicateAndCompare:
     def test_duplicate_creates_draft_copy(self, svc, run_kwargs):
         source = svc.create_run(**run_kwargs)

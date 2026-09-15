@@ -259,6 +259,7 @@ class RunDetailResponse(BaseModel):
 class DeleteRunsResponse(BaseModel):
     deleted: list[str]
     artifact_dirs: list[str]
+    skipped_artifact_dirs: list[str] = Field(default_factory=list)
 
 
 class CompareRunsResponse(BaseModel):

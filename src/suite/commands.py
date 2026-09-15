@@ -287,12 +287,24 @@ async def delete_runs(
         output_dirs = state.svc.delete_runs(body.run_ids)
     except (KeyError, RunServiceError) as exc:
         raise _domain_error(exc) from exc
+    artifact_dirs: list[str] = []
+    skipped_artifact_dirs: list[str] = []
     if body.with_artifacts:
-        for d in output_dirs:
+        # only remove directories the app created itself; a run's
+        # output_dir may point anywhere (CLI imports, old configs)
+        from .artifacts import split_deletable_artifact_dirs
+
+        deletable, skipped = split_deletable_artifact_dirs(
+            output_dirs, state.settings.runs_dir
+        )
+        for d in deletable:
             shutil.rmtree(d, ignore_errors=True)
+        artifact_dirs = deletable
+        skipped_artifact_dirs = skipped
     return DeleteRunsResponse(
         deleted=body.run_ids,
-        artifact_dirs=output_dirs if body.with_artifacts else [],
+        artifact_dirs=artifact_dirs,
+        skipped_artifact_dirs=skipped_artifact_dirs,
     )
 
 

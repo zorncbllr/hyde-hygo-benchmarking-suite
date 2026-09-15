@@ -155,7 +155,7 @@ def test_event_payload_parity_with_frontend():
 def test_misc_response_parity_with_frontend():
     cases = {
         SurfaceResponse: {"xs", "ys", "zs", "lo", "hi"},
-        DeleteRunsResponse: {"deleted", "artifact_dirs"},
+        DeleteRunsResponse: {"deleted", "artifact_dirs", "skipped_artifact_dirs"},
         OkResponse: {"ok"},
         ActiveRunResponse: {
             "active",

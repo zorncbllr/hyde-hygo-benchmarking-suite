@@ -148,6 +148,7 @@ export default function RunDetail({
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameLabel, setRenameLabel] = useState(detail.label);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteArtifacts, setDeleteArtifacts] = useState(true);
   const [busy, setBusy] = useState(false);
 
   // exports
@@ -354,11 +355,24 @@ export default function RunDetail({
   async function remove() {
     setBusy(true);
     try {
-      await pyInvokeValidated("delete_runs", deleteRunsResponseSchema, {
-        run_ids: [detail.id],
-        with_artifacts: false,
-      });
-      toast.success("Run deleted");
+      const res = await pyInvokeValidated(
+        "delete_runs",
+        deleteRunsResponseSchema,
+        {
+          run_ids: [detail.id],
+          with_artifacts: deleteArtifacts,
+        },
+      );
+      if (res.skipped_artifact_dirs.length > 0) {
+        toast.warning(
+          "Run deleted; kept artifacts outside the runs directory: " +
+            res.skipped_artifact_dirs.join(", "),
+        );
+      } else if (deleteArtifacts && res.artifact_dirs.length > 0) {
+        toast.success("Run and artifacts deleted");
+      } else {
+        toast.success("Run deleted");
+      }
       setDeleteOpen(false);
       onDeleted();
     } catch (err) {
@@ -731,10 +745,26 @@ export default function RunDetail({
           <DialogHeader>
             <DialogTitle>Delete this run?</DialogTitle>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            Run metadata is removed from the history database. Artifacts on disk
-            are kept.
-          </p>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Run metadata is removed from the history database.
+              {deleteArtifacts
+                ? " Artifacts on disk (csv, charts, payloads, report) are deleted as well."
+                : " Artifacts on disk are kept."}
+            </p>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="delete-artifacts"
+                checked={deleteArtifacts}
+                onCheckedChange={(checked) =>
+                  setDeleteArtifacts(checked === true)
+                }
+              />
+              <Label htmlFor="delete-artifacts" className="text-sm">
+                Also delete artifacts on disk
+              </Label>
+            </div>
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteOpen(false)}>
               Cancel

@@ -266,6 +266,7 @@ export type RunDetailResponse = z.infer<typeof runDetailResponseSchema>;
 export const deleteRunsResponseSchema = z.object({
   deleted: z.array(z.string()),
   artifact_dirs: z.array(z.string()),
+  skipped_artifact_dirs: z.array(z.string()).default([]),
 });
 
 export type DeleteRunsResponse = z.infer<typeof deleteRunsResponseSchema>;
