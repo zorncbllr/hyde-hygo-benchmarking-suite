@@ -10,10 +10,12 @@ import json
 
 import pytest
 
+import suite.exports as exports_mod
 from suite.db.payloads import resolve_scenario_payloads
 from suite.exports import (
     _jsonify,
     compute_analysis_summary,
+    get_or_compute_analysis_summary,
     load_results,
     run_exports_sync,
 )
@@ -43,9 +45,7 @@ def test_exported_analysis_matches_on_demand_computation(completed_run):
     the exported report."""
     svc, run_id, run_dir = completed_run
     run_exports_sync(run_id, svc, ["json"])
-    exported = json.loads(
-        (run_dir / "analysis_summary.json").read_text(encoding="utf-8")
-    )
+    exported = json.loads((run_dir / "analysis_summary.json").read_text(encoding="utf-8"))
     on_demand = compute_analysis_summary(load_results(run_dir))
     assert exported == on_demand
 
@@ -57,6 +57,54 @@ def test_jsonify_sanitizes_non_finite_floats():
     assert clean == {"a": None, "b": [1.0, None], "c": {"d": None}}
 
 
+def test_get_or_compute_persists_snapshot(completed_run):
+    """The first on-demand request computes the snapshot and persists it,
+    exactly what a subsequent export would write."""
+    svc, run_id, run_dir = completed_run
+    detail = svc.get_run_detail(run_id)
+    summary = get_or_compute_analysis_summary(run_dir, detail)
+    assert EXPECTED_KEYS <= set(summary.keys())
+    persisted = json.loads((run_dir / "analysis_summary.json").read_text(encoding="utf-8"))
+    assert persisted == summary
+
+
+def test_get_or_compute_reuses_cached_snapshot(completed_run, monkeypatch):
+    """A second request must be a cache hit: the expensive computation is
+    never touched again while the persisted snapshot is well-formed."""
+    svc, run_id, run_dir = completed_run
+    detail = svc.get_run_detail(run_id)
+    first = get_or_compute_analysis_summary(run_dir, detail)
+
+    def _boom(_all_results):
+        raise AssertionError("recomputed despite a valid cached snapshot")
+
+    monkeypatch.setattr(exports_mod, "compute_analysis_summary", _boom)
+    assert get_or_compute_analysis_summary(run_dir, detail) == first
+
+
+def test_get_or_compute_recomputes_section_incomplete_snapshot(completed_run):
+    """A partial snapshot (interrupted export, manual edit) must not reach
+    the UI: it is discarded and recomputed in full."""
+    svc, run_id, run_dir = completed_run
+    detail = svc.get_run_detail(run_id)
+    good = get_or_compute_analysis_summary(run_dir, detail)
+    path = run_dir / "analysis_summary.json"
+    path.write_text('{"friedman_objective_error": {}}', encoding="utf-8")
+    repaired = get_or_compute_analysis_summary(run_dir, detail)
+    assert repaired == good
+    assert json.loads(path.read_text(encoding="utf-8")) == good
+
+
+def test_get_or_compute_recomputes_unparsable_snapshot(completed_run):
+    """A corrupt snapshot file is treated as absent, not fatal."""
+    svc, run_id, run_dir = completed_run
+    detail = svc.get_run_detail(run_id)
+    good = get_or_compute_analysis_summary(run_dir, detail)
+    path = run_dir / "analysis_summary.json"
+    path.write_bytes(b"\x00\xff not json")
+    assert get_or_compute_analysis_summary(run_dir, detail) == good
+
+
 def test_resolve_scenario_payloads_batches_all_algorithms(completed_run):
     svc, run_id, run_dir = completed_run
     detail = svc.get_run_detail(run_id)
@@ -65,6 +113,25 @@ def test_resolve_scenario_payloads_batches_all_algorithms(completed_run):
     for payload in payloads.values():
         assert isinstance(payload["raw_costs"], list)
         assert len(payload["raw_costs"]) == 2  # n_runs
+
+
+def test_resolve_scenario_payloads_slim_excludes_heavy_fields(completed_run):
+    """The results-page batch read ships only chart data: the per-eval
+    cost histories and per-generation replay snapshots stay out of the IPC
+    transfer and are fetched per algorithm through ``get_payload``."""
+    svc, run_id, run_dir = completed_run
+    detail = svc.get_run_detail(run_id)
+    full = resolve_scenario_payloads(run_dir, detail["scenario_results"], "booth_2D")
+    slim = resolve_scenario_payloads(run_dir, detail["scenario_results"], "booth_2D", slim=True)
+    assert set(slim.keys()) == set(full.keys())
+    for payload in slim.values():
+        assert "cost_histories" not in payload
+        assert "replay_histories" not in payload
+        assert isinstance(payload["raw_costs"], list)
+        assert isinstance(payload["mean_curve"], list)
+    # the default read keeps the heavy fields the replay tab needs
+    assert all("cost_histories" in p for p in full.values())
+    assert all("replay_histories" in p for p in full.values())
 
 
 def test_resolve_scenario_payloads_unknown_scenario(completed_run):

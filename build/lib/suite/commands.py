@@ -110,7 +110,6 @@ async def ping(body: PingRequest) -> PongResponse:
     return PongResponse(message=f"pong: {body.payload}")
 
 
-
 # -- benchmark control --------------------------------------------------------
 
 
@@ -294,9 +293,7 @@ async def delete_runs(
         # output_dir may point anywhere (CLI imports, old configs)
         from .artifacts import split_deletable_artifact_dirs
 
-        deletable, skipped = split_deletable_artifact_dirs(
-            output_dirs, state.settings.runs_dir
-        )
+        deletable, skipped = split_deletable_artifact_dirs(output_dirs, state.settings.runs_dir)
         for d in deletable:
             shutil.rmtree(d, ignore_errors=True)
         artifact_dirs = deletable
@@ -358,9 +355,7 @@ async def load_results(
         raise _domain_error(exc) from exc
     path = Path(detail["output_dir"]) / "benchmark_results.json"
     if not path.exists():
-        raise InvokeException(
-            "benchmark_results.json not found; the run may not be finished"
-        )
+        raise InvokeException("benchmark_results.json not found; the run may not be finished")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -370,7 +365,12 @@ async def get_payload(
     body: GetPayloadRequest,
     state: Annotated[AppState, State()],
 ) -> dict[str, Any]:
-    """Return the zstd payload for one (scenario, algo) of a run.
+    """Return the payload for one (scenario, algo) of a run.
+
+    Serves the 3D replay tab: the full payload including
+    ``replay_histories``. ``cost_histories`` is dropped — the UI schema
+    never renders it, and it would add ~5MB per algorithm to the IPC
+    transfer.
 
     The payload path is resolved against the run directory recorded in the
     database; path traversal outside the run dir is rejected.
@@ -387,7 +387,9 @@ async def get_payload(
         raise InvokeException("invalid payload path")
     if not path.exists():
         raise InvokeException("payload file not found")
-    return read_payload(path)
+    data = read_payload(path)
+    data.pop("cost_histories", None)
+    return data
 
 
 @commands.command()
@@ -396,11 +398,14 @@ async def get_scenario_payloads(
     body: GetScenarioPayloadsRequest,
     state: Annotated[AppState, State()],
 ) -> dict[str, Any]:
-    """Return the payloads of all four algorithms for one scenario key.
+    """Return the chart payloads of all four algorithms for one scenario key.
 
     Scenario keys look like ``ackley_2D``; the payloads path is resolved
     against the run directory recorded in the database and rejected when it
-    escapes it.
+    escapes it. The oversized ``cost_histories``/``replay_histories`` fields
+    are excluded (see ``SLIM_EXCLUDED_KEYS``) so the results page mounts on
+    a few KB of IPC instead of ~60MB; the replay tab fetches the full
+    per-algorithm payload on demand through ``get_payload``.
     """
     import asyncio
     import re
@@ -421,7 +426,13 @@ async def get_scenario_payloads(
         run_dir,
         detail["scenario_results"],
         body.scenario_key,
+        slim=True,
     )
+
+
+# In-flight on-demand analysis computations, keyed by run id (single event
+# loop, so no lock is required for get/set between awaits).
+_analysis_tasks: dict[str, Any] = {}
 
 
 @commands.command()
@@ -432,32 +443,34 @@ async def get_analysis(
 ) -> dict[str, Any]:
     """Return the statistical analysis snapshot backing the DOCX report.
 
-    Uses ``analysis_summary.json`` when a previous export wrote it, and
-    otherwise computes the same analyses on demand through the reference
-    functions, so the results detail view mirrors the exported report
-    without requiring an export first.
+    Uses ``analysis_summary.json`` when a previous export or on-demand
+    computation wrote it, and otherwise computes the same analyses on demand
+    through the reference functions and persists them, so every visit after
+    the first is a cheap file read instead of a recomputation.
     """
     import asyncio
     from pathlib import Path
+
+    from .exports import get_or_compute_analysis_summary
 
     try:
         detail = state.svc.get_run_detail(body.run_id)
     except KeyError as exc:
         raise _domain_error(exc) from exc
     run_dir = Path(detail["output_dir"])
-    cached = run_dir / "analysis_summary.json"
-    if cached.exists():
-        return json.loads(cached.read_text(encoding="utf-8"))
-    # scipy/bootstrap computations are CPU-bound and mutate the reference
-    # module's globals (run configuration mirror); run them off the loop,
-    # serialized against concurrent exports, without creating export dirs.
-    from .exports import compute_analysis_summary, load_results, reference_output_context
+    # Dedupe concurrent requests for the same run (StrictMode remounts,
+    # rapid run switching): the computation is CPU-bound, serialized by the
+    # reference-module lock, and would otherwise be queued once per caller.
+    existing = _analysis_tasks.get(body.run_id)
+    if existing is not None:
+        return await asyncio.shield(existing)
+    task = asyncio.create_task(asyncio.to_thread(get_or_compute_analysis_summary, run_dir, detail))
+    _analysis_tasks[body.run_id] = task
+    task.add_done_callback(lambda _t: _analysis_tasks.pop(body.run_id, None))
+    return await asyncio.shield(task)
 
-    def _compute() -> dict[str, Any]:
-        with reference_output_context(run_dir, detail, create_dirs=False):
-            return compute_analysis_summary(load_results(run_dir))
 
-    return await asyncio.to_thread(_compute)
+# -- misc -------------------------------------------------------------------
 
 
 @commands.command()

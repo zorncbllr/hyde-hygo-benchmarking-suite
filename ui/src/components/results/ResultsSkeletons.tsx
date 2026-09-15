@@ -103,3 +103,44 @@ export function RunDetailSkeleton() {
     </div>
   );
 }
+
+/** Bar-shaped placeholder mimicking a chart area while its data loads. */
+export function ChartSkeleton({ height = 300 }: { height?: number }) {
+  return (
+    <div
+      data-testid="chart-skeleton"
+      className="space-y-2"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <div className="flex items-end gap-2" style={{ height }}>
+        {[55, 75, 40, 85, 60, 70, 45, 80].map((pct, i) => (
+          <Skeleton key={i} className="w-full" style={{ height: `${pct}%` }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Document-shaped placeholder for the statistical analyses report. */
+export function ReportSkeleton() {
+  return (
+    <div
+      data-testid="report-skeleton"
+      className="space-y-6"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      {["w-48", "w-64", "w-40"].map((w, i) => (
+        <div key={i} className="space-y-2">
+          <Skeleton className={`h-5 ${w}`} />
+          <div className="space-y-1.5">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-11/12" />
+            <Skeleton className="h-3 w-3/4" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}

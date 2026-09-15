@@ -201,6 +201,58 @@ def compute_analysis_summary(all_results: dict) -> dict:
     }
 
 
+ANALYSIS_SECTION_KEYS = frozenset(
+    {
+        "friedman_objective_error",
+        "kruskal_per_scenario",
+        "cochrans_q",
+        "chi2_convergence",
+        "friedman_wall_time",
+        "wall_time_kruskal",
+        "margin_vs_hygo",
+        "scaling",
+    }
+)
+
+
+def analysis_summary_path(run_dir: Path) -> Path:
+    """Location of the persisted statistical analysis snapshot for a run."""
+    return Path(run_dir) / "analysis_summary.json"
+
+
+def is_valid_analysis_summary(data: object) -> bool:
+    """Structural check before trusting a cached snapshot: a JSON object
+    carrying every report section (a partial file written by an interrupted
+    export or manual edit must not reach the UI)."""
+    return isinstance(data, dict) and ANALYSIS_SECTION_KEYS <= data.keys()
+
+
+def get_or_compute_analysis_summary(run_dir: Path, detail: dict) -> dict:
+    """Return the run's statistical analysis snapshot, computing it once and
+    persisting the result when ``analysis_summary.json`` is missing or
+    malformed.
+
+    Shares the export pipeline's computation so the desktop UI always
+    mirrors the exported DOCX report; the returned dict is the sanitized
+    (IPC-safe) JSON that was written, so cache and response can never
+    diverge. Must run off the event loop: it is CPU-bound and takes the
+    process-wide reference-module lock.
+    """
+    run_dir = Path(run_dir)
+    path = analysis_summary_path(run_dir)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if is_valid_analysis_summary(data):
+            return data
+    with reference_output_context(run_dir, detail, create_dirs=False):
+        summary = _jsonify(compute_analysis_summary(load_results(run_dir)))
+    _write_json(path, summary)
+    return summary
+
+
 def _reconstruct_results(payload: dict) -> list[dict]:
     """Rebuild minimal per-run result dicts for ``save_per_run_csv``."""
     n = len(payload["raw_costs"])
@@ -501,9 +553,9 @@ def run_exports_sync(
         # render them without recomputation. It backs the analysis view even
         # when the json group was not requested, but is only listed as an
         # artifact under that group.
-        _write_json(run_dir / "analysis_summary.json", analysis_summary)
+        _write_json(analysis_summary_path(run_dir), analysis_summary)
         if "json" in groups:
-            artifacts["json"].append(str(run_dir / "analysis_summary.json"))
+            artifacts["json"].append(str(analysis_summary_path(run_dir)))
 
         if "csv" in groups:
             report("per-run and analysis CSVs")

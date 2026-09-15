@@ -62,8 +62,13 @@ import {
   type ScenarioPayload,
 } from "@/lib/schemas";
 import { useSurface } from "@/hooks/useSurface";
+import { useReplayPayload } from "@/hooks/useReplayPayload";
 import Replay3D from "@/components/scene/Replay3D";
 import { AnalysesReport } from "@/components/results/AnalysesReport";
+import {
+  ChartSkeleton,
+  ReportSkeleton,
+} from "@/components/results/ResultsSkeletons";
 import { pyInvokeValidated, subscribeValidated } from "@/lib/api";
 import { formatDuration, formatMs, formatSci } from "@/lib/formatters";
 
@@ -139,8 +144,11 @@ export default function RunDetail({
   const [payloads, setPayloads] = useState<Partial<
     Record<AlgoKey, ScenarioPayload>
   > | null>(null);
+  const [payloadsLoading, setPayloadsLoading] = useState(false);
   const [scenarioKey, setScenarioKey] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisSummary | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState("convergence");
   const [replayAlgo, setReplayAlgo] = useState<AlgoKey>("hygo");
   const [replayRun, setReplayRun] = useState(0);
 
@@ -171,22 +179,45 @@ export default function RunDetail({
     setLastArtifacts(null);
   }, [detail]);
 
+  // The first visit computes and persists the analysis on the backend
+  // (subsequent visits read the cached snapshot), so show a pending state
+  // and drop stale responses when the user switches runs quickly.
   useEffect(() => {
+    let cancelled = false;
+    setAnalysisLoading(true);
     pyInvokeValidated("get_analysis", analysisSummaryResponseSchema, {
       run_id: detail.id,
     })
-      .then((a: AnalysisSummary) => setAnalysis(a))
-      .catch(() => setAnalysis(null));
+      .then((a: AnalysisSummary) => {
+        if (!cancelled) {
+          setAnalysis(a);
+          setAnalysisLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAnalysis(null);
+          setAnalysisLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [detail.id]);
 
   // Fetch payloads for all four algorithms of the selected scenario in a
   // single batched IPC call (separate invokes would trip the rate limiter).
+  // The backend excludes cost_histories/replay_histories, so this stays
+  // small; replay data is fetched per algorithm only when the replay tab
+  // is open (see useReplayPayload).
   useEffect(() => {
     if (!scenarioKey) {
       setPayloads(null);
+      setPayloadsLoading(false);
       return;
     }
     let cancelled = false;
+    setPayloadsLoading(true);
     pyInvokeValidated("get_scenario_payloads", scenarioPayloadsResponseSchema, {
       run_id: detail.id,
       scenario_key: scenarioKey,
@@ -194,15 +225,22 @@ export default function RunDetail({
       .then((entries) => {
         if (!cancelled) {
           setPayloads(entries as Partial<Record<AlgoKey, ScenarioPayload>>);
+          setPayloadsLoading(false);
         }
       })
       .catch(() => {
-        if (!cancelled) setPayloads(null);
+        if (!cancelled) {
+          setPayloads(null);
+          setPayloadsLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [detail, scenarioKey]);
+    // detail.id only: `detail` object identity also changes on list
+    // refreshes, which would refetch the same payloads twice (once for the
+    // detail change and once for the derived scenarioKey).
+  }, [detail.id, scenarioKey]);
 
   // export events
   // keep the active run id in a ref so the (mount-once) listeners only
@@ -250,18 +288,32 @@ export default function RunDetail({
   const replayFname = scenarioKey?.replace(/_\d+D$/, "") ?? "ackley";
   const { surface: replaySurface, error: replaySurfaceError } =
     useSurface(replayFname);
-  const replayHistory = payloads?.[replayAlgo]?.replay_histories ?? [];
+
+  // Replay histories live in the per-algorithm full payload and are only
+  // fetched while the replay tab is open.
+  const replayRow = useMemo(
+    () =>
+      detail.scenario_results.find(
+        (r) =>
+          r.algo_key === replayAlgo && `${r.fname}_${r.dim}D` === scenarioKey,
+      ),
+    [detail, replayAlgo, scenarioKey],
+  );
+  const replayWanted =
+    activeTab === "replay" && scenarioKey !== null && replayRow !== undefined;
+  const {
+    payload: replayPayload,
+    loading: replayLoading,
+    error: replayError,
+  } = useReplayPayload(
+    replayWanted ? detail.id : "",
+    replayWanted ? (replayRow?.payloads_path ?? null) : null,
+  );
+  const replayHistory = replayPayload?.replay_histories ?? [];
 
   useEffect(() => {
-    const algos = ALGO_KEYS.filter(
-      (k) => payloads?.[k]?.replay_histories?.length,
-    );
-    if (algos.length > 0 && !algos.includes(replayAlgo)) {
-      setReplayAlgo(algos[0]);
-    }
-    const nRuns = payloads?.[replayAlgo]?.replay_histories?.length ?? 0;
-    if (replayRun >= nRuns) setReplayRun(0);
-  }, [payloads, replayAlgo, replayRun]);
+    if (replayRun >= detail.n_runs) setReplayRun(0);
+  }, [detail.n_runs, replayRun]);
 
   const convergenceOption = useMemo<EChartsOption>(
     () => ({
@@ -569,7 +621,7 @@ export default function RunDetail({
           <CardTitle className="text-base">Distributions</CardTitle>
         </CardHeader>
         <CardContent>
-          <Tabs defaultValue="convergence">
+          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v)}>
             <TabsList>
               <TabsTrigger value="convergence">Convergence curve</TabsTrigger>
               <TabsTrigger value="box">Cost distribution</TabsTrigger>
@@ -594,7 +646,9 @@ export default function RunDetail({
                   </SelectContent>
                 </Select>
               )}
-              {payloads ? (
+              {payloadsLoading ? (
+                <ChartSkeleton />
+              ) : payloads ? (
                 <Chart option={convergenceOption} />
               ) : (
                 <p className="py-16 text-center text-sm text-muted-foreground">
@@ -610,7 +664,9 @@ export default function RunDetail({
               )}
             </TabsContent>
             <TabsContent value="box">
-              {payloads ? (
+              {payloadsLoading ? (
+                <ChartSkeleton />
+              ) : payloads ? (
                 <Chart option={boxOption} />
               ) : (
                 <p className="py-16 text-center text-sm text-muted-foreground">
@@ -666,13 +722,11 @@ export default function RunDetail({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(payloads?.[replayAlgo]?.replay_histories ?? []).map(
-                          (_, i) => (
-                            <SelectItem key={i} value={String(i)}>
-                              run {i + 1}
-                            </SelectItem>
-                          ),
-                        )}
+                        {Array.from({ length: detail.n_runs }, (_, i) => (
+                          <SelectItem key={i} value={String(i)}>
+                            run {i + 1}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                     <span
@@ -688,6 +742,17 @@ export default function RunDetail({
                     <p className="py-16 text-center text-sm text-muted-foreground">
                       Loading surface...
                     </p>
+                  ) : replayLoading ? (
+                    <div className="space-y-3">
+                      <ChartSkeleton height={420} />
+                      <p className="text-center text-sm text-muted-foreground">
+                        Loading replay data...
+                      </p>
+                    </div>
+                  ) : replayError ? (
+                    <p className="py-16 text-center text-sm text-destructive">
+                      Replay data unavailable: {replayError}
+                    </p>
                   ) : (
                     <Replay3D
                       surface={replaySurface}
@@ -701,7 +766,14 @@ export default function RunDetail({
               )}
             </TabsContent>
             <TabsContent value="analyses">
-              {analysis ? (
+              {analysisLoading ? (
+                <div className="space-y-3">
+                  <ReportSkeleton />
+                  <p className="text-center text-sm text-muted-foreground">
+                    Computing statistical analyses...
+                  </p>
+                </div>
+              ) : analysis ? (
                 <AnalysesReport
                   analysis={analysis}
                   scenarioResults={detail.scenario_results}

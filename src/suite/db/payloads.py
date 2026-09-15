@@ -32,16 +32,32 @@ def read_payload(path: Path) -> Any:
     return json.loads(zstd.ZstdDecompressor().decompress(blob))
 
 
+# Per-eval cost histories and per-generation population snapshots dominate a
+# payload (~15MB of a ~17MB file for a 50-run 2D scenario) but are never
+# rendered by the results charts: cost_histories is not part of the UI
+# schema at all, and replay_histories is fetched per algorithm on demand
+# through ``get_payload`` when the 3D replay tab opens. Excluding them keeps
+# the mount-time batch read in the tens of KB instead of ~60MB over IPC.
+SLIM_EXCLUDED_KEYS = frozenset({"cost_histories", "replay_histories"})
+
+
 def resolve_scenario_payloads(
     run_dir: Path,
     scenario_results: list[dict],
     scenario_key: str,
+    *,
+    slim: bool = False,
 ) -> dict[str, Any]:
     """Batch-read the payloads of every algorithm for one scenario key
     (``<fname>_<dim>D``).
 
     Paths are resolved against ``run_dir`` and rejected when they escape it,
     mirroring the single-payload command's traversal protection.
+
+    With ``slim=True`` the oversized ``cost_histories``/``replay_histories``
+    fields are excluded (see :data:`SLIM_EXCLUDED_KEYS`); use it for
+    interactive reads, keep the default for anything that needs the full
+    payload.
     """
     run_dir = Path(run_dir).resolve()
     payloads: dict[str, Any] = {}
@@ -53,7 +69,10 @@ def resolve_scenario_payloads(
             raise ValueError("invalid payload path")
         if not path.exists():
             raise FileNotFoundError(f"payload file not found: {path.name}")
-        payloads[sr["algo_key"]] = read_payload(path)
+        data = read_payload(path)
+        if slim:
+            data = {k: v for k, v in data.items() if k not in SLIM_EXCLUDED_KEYS}
+        payloads[sr["algo_key"]] = data
     if not payloads:
         raise ValueError(f"unknown scenario: {scenario_key}")
     return payloads
