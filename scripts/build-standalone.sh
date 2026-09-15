@@ -58,7 +58,41 @@ uv pip install \
   --reinstall-package="${PY_PROJECT_NAME}" \
   "${REPO_ROOT}"
 
-# --- 3. Build and bundle ----------------------------------------------------
+# --- 3. Strip Tcl/Tk from the embedded interpreter ---------------------------
+# Nothing in the app uses Tk: the GUI is Tauri and matplotlib is pinned to the
+# Agg backend in suite/chart_worker.py. python-build-standalone still ships
+# tcl/tk plus a `_tkinter` extension whose RPATH points at its build-time
+# /tools/deps/lib, so linuxdeploy fails AppImage bundling with
+# "Could not find dependency: libtcl9tk9.0.so" while scanning lib-dynload.
+# Removing the dead weight keeps the bundle smaller and the bundler happy.
+if [[ -d "${PYEMBED_DIR}/python/lib" ]]; then
+  echo "Stripping unused Tcl/Tk from the embedded interpreter ..."
+  rm -f "${PYEMBED_DIR}"/python/lib/libtcl*.so "${PYEMBED_DIR}"/python/lib/libtk*.so
+  rm -rf "${PYEMBED_DIR}"/python/lib/tcl9* "${PYEMBED_DIR}"/python/lib/tk9* \
+    "${PYEMBED_DIR}"/python/lib/itcl* "${PYEMBED_DIR}"/python/lib/thread*/
+  rm -f "${PYEMBED_DIR}"/python/lib/python3.13/lib-dynload/_tkinter*.so \
+    "${PYEMBED_DIR}"/python/lib/python3.13/lib-dynload/turtle* 2>/dev/null || true
+  rm -rf "${PYEMBED_DIR}"/python/lib/python3.13/tkinter \
+    "${PYEMBED_DIR}"/python/lib/python3.13/turtledemo
+  rm -f "${PYEMBED_DIR}"/python/bin/idle*
+  # The tauri CLI copies the bundled resources next to the cargo binary
+  # (target/<profile>/{bin,lib,include,share}) and never prunes removed
+  # files, so stale tcl/tk copies would keep leaking into every bundle.
+  rm -rf "${REPO_ROOT}/src-tauri/target/bundle-release/bin" \
+    "${REPO_ROOT}/src-tauri/target/bundle-release/lib" \
+    "${REPO_ROOT}/src-tauri/target/bundle-release/include" \
+    "${REPO_ROOT}/src-tauri/target/bundle-release/share"
+  # AppImage staging dirs are also reused across runs without pruning.
+  rm -rf "${REPO_ROOT}/src-tauri/target/bundle-release/bundle/appimage_deb" \
+    "${REPO_ROOT}/src-tauri/target/bundle-release/bundle/appimage"
+fi
+
+# --- 4. Build and bundle ----------------------------------------------------
+# The linuxdeploy pinned by tauri bundles an older binutils that cannot strip
+# Fedora 41 system libraries using DT_RELR (.relr.dyn) sections, and its
+# "Strip call failed" aborts AppImage bundling. NO_STRIP is linuxdeploy's
+# supported opt-out; the AppImage just ships unstripped libraries.
+export NO_STRIP=1
 # Point pyo3 at the embedded interpreter so it links the bundled libpython,
 # and set an rpath so the installed binary can find it in the resource dir.
 export PYO3_PYTHON="${PYEMBED_BIN}"

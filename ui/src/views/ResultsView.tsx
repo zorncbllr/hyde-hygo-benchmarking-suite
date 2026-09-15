@@ -22,6 +22,10 @@ import {
 } from "@/lib/schemas";
 import { formatDuration } from "@/lib/formatters";
 import RunDetail from "@/components/results/RunDetail";
+import {
+  RunDetailSkeleton,
+  RunsListSkeleton,
+} from "@/components/results/ResultsSkeletons";
 
 /** Debounce window for the search input before refetching the run list. */
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -48,8 +52,10 @@ export default function ResultsView() {
     (location.state as { runId?: string } | null)?.runId ?? null;
 
   const [runs, setRuns] = useState<RunRow[]>([]);
+  const [runsLoading, setRunsLoading] = useState(true);
   const [selected, setSelected] = useState<string | null>(handedOffRunId);
   const [detail, setDetail] = useState<RunDetailResponse | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -61,6 +67,7 @@ export default function ResultsView() {
   }, [searchInput]);
 
   const loadRuns = useCallback(async () => {
+    setRunsLoading(true);
     try {
       const res = await pyInvokeValidated("list_runs", listRunsResponseSchema, {
         status: statusFilter === "all" ? null : statusFilter,
@@ -81,6 +88,8 @@ export default function ResultsView() {
       }
     } catch (err) {
       toast.error(`Failed to load run history: ${String(err)}`);
+    } finally {
+      setRunsLoading(false);
     }
   }, [statusFilter, search, handedOffRunId]);
 
@@ -91,16 +100,30 @@ export default function ResultsView() {
   useEffect(() => {
     if (!selected) {
       setDetail(null);
+      setDetailLoading(false);
       return;
     }
+    let cancelled = false;
+    setDetailLoading(true);
     pyInvokeValidated("get_run_detail", runDetailResponseSchema, {
       run_id: selected,
     })
-      .then((d: RunDetailResponse) => setDetail(d))
+      .then((d: RunDetailResponse) => {
+        if (!cancelled) {
+          setDetail(d);
+          setDetailLoading(false);
+        }
+      })
       .catch((err: unknown) => {
         toast.error(String(err));
-        setDetail(null);
+        if (!cancelled) {
+          setDetail(null);
+          setDetailLoading(false);
+        }
       });
+    return () => {
+      cancelled = true;
+    };
   }, [selected]);
 
   function refresh() {
@@ -160,7 +183,9 @@ export default function ResultsView() {
           </Select>
         </div>
         <div className="flex-1 overflow-y-auto p-2">
-          {runs.length === 0 ? (
+          {runsLoading ? (
+            <RunsListSkeleton />
+          ) : runs.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No runs found.
             </p>
@@ -214,7 +239,9 @@ export default function ResultsView() {
 
       {/* Detail */}
       <main className="flex-1 overflow-y-auto p-6">
-        {detail ? (
+        {detailLoading ? (
+          <RunDetailSkeleton />
+        ) : detail ? (
           <RunDetail
             detail={detail}
             onChanged={refresh}

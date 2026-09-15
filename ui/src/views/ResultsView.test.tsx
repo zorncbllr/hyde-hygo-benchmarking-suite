@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import ResultsView from "./ResultsView";
+import { pyInvokeValidated } from "@/lib/api";
 import type { RunDetailResponse, RunRow } from "@/lib/schemas";
 
 const runRow: RunRow = {
@@ -99,5 +100,64 @@ describe("ResultsView", () => {
     await waitFor(() => {
       expect(screen.getByText(/booth 2D/)).toBeInTheDocument();
     });
+  });
+
+  it("renders skeleton placeholders while the run list is loading", () => {
+    vi.mocked(pyInvokeValidated).mockImplementationOnce(
+      (() => new Promise(() => {})) as unknown as typeof pyInvokeValidated,
+    );
+    const { container } = render(
+      <MemoryRouter>
+        <ResultsView />
+      </MemoryRouter>,
+    );
+    expect(
+      container.querySelectorAll('[data-slot="skeleton"]').length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("No runs found.")).not.toBeInTheDocument();
+  });
+
+  it("renders the detail skeleton while the run detail is loading", async () => {
+    vi.mocked(pyInvokeValidated)
+      .mockImplementationOnce((() =>
+        Promise.resolve({
+          items: [runRow],
+          total: 1,
+          page: 1,
+          per_page: 100,
+        })) as unknown as typeof pyInvokeValidated)
+      .mockImplementationOnce(
+        (() => new Promise(() => {})) as unknown as typeof pyInvokeValidated,
+      );
+    const { container } = render(
+      <MemoryRouter>
+        <ResultsView />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("test run")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(
+        container.querySelectorAll('[data-slot="skeleton"]').length,
+      ).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText(/booth 2D/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Select a run from the history/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("replaces the skeletons with content once loading finishes", async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <ResultsView />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/booth 2D/)).toBeInTheDocument();
+    });
+    expect(container.querySelectorAll('[data-slot="skeleton"]').length).toBe(0);
+    expect(screen.getAllByText("test run").length).toBeGreaterThan(0);
   });
 });
