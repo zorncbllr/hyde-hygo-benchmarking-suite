@@ -1045,7 +1045,8 @@ def make_scaling_chart(scaling_results):
                label=ALGO_LABELS[ak], color=ALGO_COLOURS[ak], alpha=0.85)
 
     ax.set_xticks(x)
-    ax.set_xticklabels([fn.replace('_', '\n') for fn in fnames_present], fontsize=8)
+    ax.set_xticklabels([fn.replace('_', ' ') for fn in fnames_present],
+                       rotation=0, fontsize=10)
     ax.set_ylabel('Coefficient of Variation at 25D')
     ax.set_title('(e) Result Consistency at 25D — CV per Benchmark',
                  fontweight='bold')
@@ -1078,7 +1079,10 @@ def make_scaling_chart(scaling_results):
     for i in range(n_algo):
         for j in range(n_fn):
             val = deg_matrix[i, j]
-            txt = f"{val:.1f}" if abs(val) < 1e6 else f"{val:.1e}"
+            if not np.isfinite(val):
+                txt = 'inf'
+            else:
+                txt = f"{val:.1e}" if abs(val) >= 1e6 else f"{val:.1f}"
             ax.text(j, i, txt, ha='center', va='center', fontsize=7,
                     color='white' if deg_display[i, j] > deg_display.max() * 0.6 else 'black')
     fig.colorbar(im, ax=ax,
@@ -1120,8 +1124,8 @@ def make_cost_charts(all_results):
         ax.bar(x + offset, times, width,
                label=ALGO_LABELS[ak], color=ALGO_COLOURS[ak], alpha=0.85)
     ax.set_xticks(x)
-    ax.set_xticklabels([bk.replace('_', '\n') for bk in bench_keys],
-                       rotation=0, fontsize=7)
+    ax.set_xticklabels([bk.replace('_', ' ') for bk in bench_keys],
+                       rotation=90, ha='right', fontsize=16)
     ax.set_ylabel('Mean Wall-Clock Time (ms)')
     ax.set_title('(c) Computational Cost — Mean Wall-Clock Time per Benchmark',
                  fontweight='bold')
@@ -1184,8 +1188,8 @@ def make_convergence_charts(all_results):
         ax.bar(x + offset, rates, width,
                label=ALGO_LABELS[ak], color=ALGO_COLOURS[ak], alpha=0.85)
     ax.set_xticks(x)
-    ax.set_xticklabels([bk.replace('_', '\n') for bk in bench_keys],
-                       rotation=0, fontsize=7)
+    ax.set_xticklabels([bk.replace('_', ' ') for bk in bench_keys],
+                       rotation=90, ha='right', fontsize=16)
     ax.set_ylim(0, 110)
     ax.set_ylabel('Convergence Rate (%)')
     ax.set_title(f'(b) Convergence Rate — % of {N_RUNS} Runs that Converged per Benchmark',

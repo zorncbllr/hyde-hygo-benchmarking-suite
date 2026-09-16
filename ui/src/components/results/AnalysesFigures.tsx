@@ -158,11 +158,11 @@ export function ConvergenceRateFigure({
       backgroundColor: "transparent",
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: AXIS_TEXT }, top: 0 },
-      grid: { left: 72, right: 16, top: 28, bottom: 56 },
+      grid: { left: 72, right: 16, top: 28, bottom: 130 },
       xAxis: {
         type: "category",
-        data: keys.map((k) => k.replace("_", "\n")),
-        axisLabel: { ...axisLabel, interval: 0, rotate: 30 },
+        data: keys.map((k) => k.replace("_", " ")),
+        axisLabel: { ...axisLabel, fontSize: 16, interval: 0, rotate: 90 },
       },
       yAxis: { type: "value", axisLabel, splitLine },
       series: ALGO_KEYS.map((ak) => ({
@@ -180,7 +180,7 @@ export function ConvergenceRateFigure({
       testId="fig-b-conv"
       caption="Convergence rate - percentage of runs that converged per benchmark"
       option={option}
-      height={280}
+      height={340}
     />
   );
 }
@@ -306,11 +306,11 @@ export function WallTimePerBenchmarkFigure({
           typeof v === "number" ? `${v.toFixed(0)} ms` : String(v),
       },
       legend: { textStyle: { color: AXIS_TEXT }, top: 0 },
-      grid: { left: 72, right: 16, top: 28, bottom: 32 },
+      grid: { left: 72, right: 16, top: 28, bottom: 130 },
       xAxis: {
         type: "category",
-        data: keys.map((k) => k.replace("_", "\n")),
-        axisLabel,
+        data: keys.map((k) => k.replace("_", " ")),
+        axisLabel: { ...axisLabel, fontSize: 16, interval: 0, rotate: 90 },
       },
       yAxis: { type: "value", axisLabel, splitLine },
       series: ALGO_KEYS.map((ak) => ({
@@ -328,7 +328,7 @@ export function WallTimePerBenchmarkFigure({
       testId="fig-c-per-benchmark"
       caption="Computational cost - mean wall-clock time per benchmark"
       option={option}
-      height={300}
+      height={360}
     />
   );
 }
@@ -567,8 +567,8 @@ export function Cv25dFigure({
       grid: { left: 72, right: 16, top: 28, bottom: 48 },
       xAxis: {
         type: "category",
-        data: fnames.map((f) => f.replace("_", "\n")),
-        axisLabel: { ...axisLabel, interval: 0, rotate: 30 },
+        data: fnames.map((f) => f.replace("_", " ")),
+        axisLabel: { ...axisLabel, interval: 0, rotate: 0 },
       },
       yAxis: { type: "value", axisLabel, splitLine },
       series: ALGO_KEYS.map((ak) => ({
