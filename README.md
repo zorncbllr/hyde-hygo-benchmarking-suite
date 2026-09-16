@@ -96,6 +96,22 @@ bun run build    # production build
   `generate_docx_report` functions with the module output constants
   redirected to the run directory, so artifact contents match a CLI run.
 
+### Environment fingerprint and cross-machine reproducibility
+
+Bit-exact reproducibility of a seeded run only holds within the same
+numerical environment. LAPACK kernels used by the algorithms (CMA-ES `eigh`,
+HyGO's SVD degeneracy check) can return slightly different floats across
+BLAS builds, and CMA-ES trajectories then diverge from that point on. The
+worker therefore writes an `environment.json` (interpreter, numpy, scipy,
+BLAS name/version) into every run directory next to `config.json`; only
+compare two runs bit-for-bit when their fingerprints match.
+
+`tests/test_golden_regression.py` pins a small fixed benchmark to a SHA-256
+of its raw per-run results (`tests/golden.json`) to catch unintended drift
+in the vendored algorithms; it is environment-sensitive by design and can
+be regenerated after a deliberate numpy/BLAS upgrade with
+`python tests/test_golden_regression.py`.
+
 ## Packaging
 
 ```bash

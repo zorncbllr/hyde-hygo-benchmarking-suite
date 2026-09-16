@@ -1,5 +1,6 @@
 """Tests for the benchmark runner, app state and telemetry."""
 
+import json
 import threading
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from suite.config import Settings
 from suite.db import RunService, make_engine, make_session_factory, run_migrations
+from suite.environment import environment_fingerprint
 from suite.runner import BenchmarkWorker, default_algo_kwargs
 from suite.schemas import (
     AlgoParams,
@@ -55,6 +57,19 @@ def worker_env(tmp_path: Path):
     run_dir.mkdir(parents=True)
     yield svc, run_dir
     engine.dispose()
+
+
+class TestEnvironmentFingerprint:
+    def test_fingerprint_shape(self):
+        fp = environment_fingerprint()
+        assert {"python", "python_implementation", "platform", "machine", "numpy", "blas"} <= set(
+            fp
+        )
+        assert fp["blas"] is None or isinstance(fp["blas"], dict)
+        assert fp["numpy"]
+
+    def test_fingerprint_json_serializable(self):
+        json.dumps(environment_fingerprint())
 
 
 class TestBenchmarkWorker:
@@ -116,6 +131,9 @@ class TestBenchmarkWorker:
         results = (run_dir / "benchmark_results.json").read_text(encoding="utf-8")
         assert "booth_2D" in results
         assert (run_dir / "config.json").exists()
+        environment = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
+        assert environment["numpy"]
+        assert environment["python"]
         payloads = list((run_dir / "payloads").glob("*.json.zst"))
         assert len(payloads) == 4
 
@@ -182,9 +200,7 @@ class TestBenchmarkWorker:
         worker.join(timeout=30)
         assert svc.get_run(run.id).status == "cancelled"
         assert len(collector.of("benchmark://cancelled")) == 1
-        assert isinstance(
-            collector.of("benchmark://cancelled")[0], CancelledEvent
-        )
+        assert isinstance(collector.of("benchmark://cancelled")[0], CancelledEvent)
 
 
 class TestDefaultAlgoKwargs:
@@ -219,7 +235,9 @@ class TestThrottledEmitter:
 
     def test_phase_change_passes_through(self):
         calls = []
-        emitter = ThrottledEmitter(lambda e, p: calls.append(e), min_interval=1.0, clock=lambda: 0.0)
+        emitter = ThrottledEmitter(
+            lambda e, p: calls.append(e), min_interval=1.0, clock=lambda: 0.0
+        )
 
         class P(BaseModel):
             algo_key: str = "hygo"
@@ -231,7 +249,9 @@ class TestThrottledEmitter:
 
     def test_non_telemetry_unthrottled(self):
         calls = []
-        emitter = ThrottledEmitter(lambda e, p: calls.append(e), min_interval=1.0, clock=lambda: 0.0)
+        emitter = ThrottledEmitter(
+            lambda e, p: calls.append(e), min_interval=1.0, clock=lambda: 0.0
+        )
 
         class P(BaseModel):
             pass

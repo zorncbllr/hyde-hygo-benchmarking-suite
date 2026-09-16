@@ -31,6 +31,7 @@ from hyde_bench.run_benchmark import (
 
 from .db import RunService
 from .db.payloads import write_payload
+from .environment import environment_fingerprint
 from .schemas import (
     AlgoParams,
     BenchmarkConfig,
@@ -121,6 +122,9 @@ class BenchmarkWorker(threading.Thread):
         (self.run_dir / "payloads").mkdir(parents=True, exist_ok=True)
         (self.run_dir / "config.json").write_text(
             config.model_dump_json(indent=2), encoding="utf-8"
+        )
+        (self.run_dir / "environment.json").write_text(
+            json.dumps(environment_fingerprint(), indent=2), encoding="utf-8"
         )
 
     def snapshot(self) -> dict:
