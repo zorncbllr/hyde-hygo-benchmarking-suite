@@ -232,7 +232,7 @@ export function AnalysesReport({
     ? `${scalingStats.rowsByAlgo
         .map(
           (r) =>
-            `${r.label}: significant degradation on ${r.nDeg}/${r.n} functions, mean CV at 25D = ${fixed(r.meanCv25, 4)}, mean degradation ratio = ${fixed(r.meanDeg)}.`,
+            `${r.label}: significant degradation on ${r.nDeg}/${r.n} functions, mean CV at 25D = ${fixed(r.meanCv25, 4)}, mean normalized degradation = ${fixed(r.meanDeg)}.`,
         )
         .join(
           " ",
@@ -480,7 +480,9 @@ export function AnalysesReport({
                   <TableHead className="text-right">d</TableHead>
                   <TableHead className="text-right">CV 2D</TableHead>
                   <TableHead className="text-right">CV 25D</TableHead>
-                  <TableHead className="text-right">Deg. Ratio</TableHead>
+                  <TableHead className="text-right">
+                    Norm. Degradation
+                  </TableHead>
                   <TableHead>Dir.</TableHead>
                 </TableRow>
               </TableHeader>
@@ -509,7 +511,7 @@ export function AnalysesReport({
                     </TableCell>
                     <TableCell className="text-right font-mono text-xs">
                       {row.degradation_ratio === null
-                        ? "inf"
+                        ? "n/a"
                         : row.degradation_ratio.toFixed(2)}
                     </TableCell>
                     <TableCell>{row.direction ?? "n/a"}</TableCell>

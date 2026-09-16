@@ -42,12 +42,15 @@ def test_compute_analysis_summary_section_keys(completed_run):
 def test_exported_analysis_matches_on_demand_computation(completed_run):
     """analysis_summary.json written by exports is identical to computing
     the analyses on demand — the UI must never show different numbers than
-    the exported report."""
+    the exported report. (Both carry the metric_version stamp; compare the
+    report sections.)"""
     svc, run_id, run_dir = completed_run
     run_exports_sync(run_id, svc, ["json"])
     exported = json.loads((run_dir / "analysis_summary.json").read_text(encoding="utf-8"))
     on_demand = compute_analysis_summary(load_results(run_dir))
-    assert exported == on_demand
+    stamped = {**on_demand, "metric_version": 2}
+    assert exported == stamped
+    assert exported["metric_version"] == 2
 
 
 def test_jsonify_sanitizes_non_finite_floats():
@@ -103,6 +106,32 @@ def test_get_or_compute_recomputes_unparsable_snapshot(completed_run):
     path = run_dir / "analysis_summary.json"
     path.write_bytes(b"\x00\xff not json")
     assert get_or_compute_analysis_summary(run_dir, detail) == good
+
+
+def test_get_or_compute_recomputes_outdated_metric_snapshot(completed_run, monkeypatch):
+    """Snapshots persisted before the normalized-degradation metric (no
+    metric_version stamp) must be recomputed, never served."""
+    import suite.exports as exports_mod
+
+    svc, run_id, run_dir = completed_run
+    detail = svc.get_run_detail(run_id)
+    path = run_dir / "analysis_summary.json"
+    good = get_or_compute_analysis_summary(run_dir, detail)
+    assert exports_mod.ANALYSIS_METRIC_VERSION == 2
+
+    # emulate a pre-versioning cache: same payload, no metric_version stamp
+    stale = {k: v for k, v in good.items() if k != "metric_version"}
+    path.write_text(json.dumps(stale), encoding="utf-8")
+    calls = []
+    original = exports_mod.compute_analysis_summary
+
+    def _spy(all_results):
+        calls.append(1)
+        return original(all_results)
+
+    monkeypatch.setattr(exports_mod, "compute_analysis_summary", _spy)
+    assert get_or_compute_analysis_summary(run_dir, detail) == good
+    assert calls == [1]
 
 
 def test_resolve_scenario_payloads_batches_all_algorithms(completed_run):

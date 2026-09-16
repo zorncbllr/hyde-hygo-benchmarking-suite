@@ -214,6 +214,12 @@ ANALYSIS_SECTION_KEYS = frozenset(
     }
 )
 
+# Bump when the analysis semantics change so persisted snapshots from older
+# builds are recomputed instead of served: 2 = normalized degradation
+# ((mean_25D - mean_2D) / max(mean_2D, 1e-12)) replaced the plain
+# mean_25D / mean_2D ratio, which produced inf for exact 2D convergence.
+ANALYSIS_METRIC_VERSION = 2
+
 
 def analysis_summary_path(run_dir: Path) -> Path:
     """Location of the persisted statistical analysis snapshot for a run."""
@@ -223,8 +229,21 @@ def analysis_summary_path(run_dir: Path) -> Path:
 def is_valid_analysis_summary(data: object) -> bool:
     """Structural check before trusting a cached snapshot: a JSON object
     carrying every report section (a partial file written by an interrupted
-    export or manual edit must not reach the UI)."""
-    return isinstance(data, dict) and ANALYSIS_SECTION_KEYS <= data.keys()
+    export or manual edit must not reach the UI) and stamped with the
+    current metric version (older snapshots carry outdated semantics)."""
+    return (
+        isinstance(data, dict)
+        and ANALYSIS_SECTION_KEYS <= data.keys()
+        and data.get("metric_version") == ANALYSIS_METRIC_VERSION
+    )
+
+
+def persist_analysis_summary(path: Path, summary: dict) -> dict:
+    """Stamp and atomically write an analysis snapshot (IPC-safe JSON);
+    returns the exact dict that was written."""
+    stamped = {**summary, "metric_version": ANALYSIS_METRIC_VERSION}
+    _write_json(path, stamped)
+    return stamped
 
 
 def get_or_compute_analysis_summary(run_dir: Path, detail: dict) -> dict:
@@ -249,8 +268,7 @@ def get_or_compute_analysis_summary(run_dir: Path, detail: dict) -> dict:
             return data
     with reference_output_context(run_dir, detail, create_dirs=False):
         summary = _jsonify(compute_analysis_summary(load_results(run_dir)))
-    _write_json(path, summary)
-    return summary
+    return persist_analysis_summary(path, summary)
 
 
 def _reconstruct_results(payload: dict) -> list[dict]:
@@ -416,6 +434,65 @@ def _install_render_guard(log: Callable[[str], None]) -> None:
     Figure.tight_layout = tight_layout  # type: ignore[method-assign]
 
 
+CSV_SUBPROCESS_TIMEOUT = 900
+
+
+def _write_csvs_subprocess(run_dir: Path, detail: dict) -> None:
+    """Write the per-run CSVs in a fresh interpreter with a process pool.
+
+    The payloads decompress to ~17MB of JSON each and stdlib json.loads
+    holds the GIL, so the sequential in-process loop is CPU-bound; a clean
+    single-threaded child with its own pool parses them in parallel.
+    Raises when the worker crashes, times out, or reports per-payload
+    failures (the caller falls back to the sequential loop).
+    """
+    spec_path = run_dir / "csv_worker_args.json"
+    _write_json(
+        spec_path,
+        {
+            "run_dir": str(run_dir),
+            "n_runs": detail["n_runs"],
+            "max_evals": detail["max_evals"],
+            "alpha": detail["alpha"],
+            "test_cases": [{"fname": tc["fname"], "dim": tc["dim"]} for tc in detail["test_cases"]],
+            "scenario_results": [
+                {
+                    "algo_key": sr["algo_key"],
+                    "fname": sr["fname"],
+                    "dim": sr["dim"],
+                    "payloads_path": sr["payloads_path"],
+                }
+                for sr in detail["scenario_results"]
+            ],
+        },
+    )
+    mpl_cfg = run_dir / "mpl_config"
+    mpl_cfg.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "PYTHONNOUSERSITE": "1",
+        "MPLBACKEND": "Agg",
+        "MPLCONFIGDIR": str(mpl_cfg),
+        "PYTHONPATH": os.pathsep.join(dict.fromkeys(p for p in sys.path if p and os.path.isdir(p))),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "suite.csv_worker", "--args", str(spec_path)],
+        capture_output=True,
+        text=True,
+        timeout=CSV_SUBPROCESS_TIMEOUT,
+        env=env,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr.strip() or proc.stdout.strip())[-4000:]
+        raise RuntimeError(f"csv worker failed (exit {proc.returncode}): {err}")
+    # the worker prints exactly one JSON line; tolerate stray stdout noise
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    result = json.loads(lines[-1]) if lines else {"failures": ["no output"]}
+    if result.get("failures"):
+        raise RuntimeError("; ".join(result["failures"][:5]))
+
+
 def _render_chart_subprocess(run_dir: Path, config: dict, fn_name: str, args: list) -> None:
     """Run one ``hyde_bench.run_benchmark`` chart function in a fresh
     interpreter so corrupted matplotlib state (inflated renderer geometry,
@@ -553,15 +630,19 @@ def run_exports_sync(
         # render them without recomputation. It backs the analysis view even
         # when the json group was not requested, but is only listed as an
         # artifact under that group.
-        _write_json(analysis_summary_path(run_dir), analysis_summary)
+        persist_analysis_summary(analysis_summary_path(run_dir), analysis_summary)
         if "json" in groups:
             artifacts["json"].append(str(analysis_summary_path(run_dir)))
 
         if "csv" in groups:
             report("per-run and analysis CSVs")
-            for sr in detail["scenario_results"]:
-                _guarded_per_run(sr)
-            gc.collect()
+            try:
+                _write_csvs_subprocess(run_dir, detail)
+            except Exception as exc:  # noqa: BLE001 - fall back, then record
+                log(f"parallel CSV worker unavailable; falling back to the in-process loop: {exc}")
+                for sr in detail["scenario_results"]:
+                    _guarded_per_run(sr)
+                gc.collect()
             guarded(
                 "analysis CSVs",
                 lambda: (

@@ -218,7 +218,7 @@ describe("AnalysesReport", () => {
     expect(screen.getByText("Speedup vs HyGO")).toBeInTheDocument();
   });
 
-  it("renders the infinite degradation ratio as inf", () => {
+  it("renders a null degradation value as n/a", () => {
     const analysis = makeAnalysis();
     analysis.scaling = [
       {
@@ -233,7 +233,8 @@ describe("AnalysesReport", () => {
         nRuns={2}
       />,
     );
-    expect(screen.getByText("inf")).toBeInTheDocument();
+    expect(screen.getAllByText("n/a").length).toBeGreaterThan(0);
+    expect(screen.queryByText("inf")).not.toBeInTheDocument();
   });
 
   it("renders the report figures (a)-(e) as charts", () => {

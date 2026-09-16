@@ -19,7 +19,7 @@ Answers five research questions:
         difference
   (e) Performance as dimensionality scales from 2D to 25D across five
       shared scalable benchmark functions
-      → Wilcoxon rank-sum + Cliff's delta + CV + degradation ratio
+      → Wilcoxon rank-sum + Cliff's delta + CV + normalized degradation
 
 Cliff's delta thresholds (Robledo et al., 2025 / thesis methodology):
   negligible < 0.147, small >= 0.147, medium >= 0.33, large >= 0.474
@@ -602,16 +602,21 @@ def bootstrap_mean_diff_ci(a, b, n_boot=10000, ci=0.95, seed=42):
     """
     Bootstrap 95% CI on the mean difference (a - b).
     Negative CI means 'a' tends to be smaller (better for minimization).
+
+    Resampling is fully vectorized while drawing the exact same index
+    stream as the naive per-iteration loop: one integers() call over a
+    (n_boot, na+nb) grid with per-column bounds reproduces the loop's
+    interleaved a-then-b draw order, so the CIs are bit-identical to the
+    naive implementation (seeded) while running orders of magnitude
+    faster (60 comparisons x 10k resamples used to take ~15s).
     """
     rng = np.random.default_rng(seed)
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
-    diffs = np.empty(n_boot)
     na, nb = len(a), len(b)
-    for i in range(n_boot):
-        sa = a[rng.integers(0, na, na)]
-        sb = b[rng.integers(0, nb, nb)]
-        diffs[i] = sa.mean() - sb.mean()
+    high = np.array([na] * na + [nb] * nb, dtype=np.int64)
+    idx = rng.integers(0, high, (n_boot, na + nb))
+    diffs = a[idx[:, :na]].mean(axis=1) - b[idx[:, na:]].mean(axis=1)
     alpha_half = (1 - ci) / 2
     lo = float(np.percentile(diffs, 100 * alpha_half))
     hi = float(np.percentile(diffs, 100 * (1 - alpha_half)))
@@ -685,7 +690,7 @@ def wilcoxon_margin_vs_hygo(key, entry, hyde_key):
 
 # ============================================================================
 # 7. QUESTION (e) — Dimensionality scaling 2D → 25D
-#    Wilcoxon + Cliff's delta + CV + degradation ratio
+#    Wilcoxon + Cliff's delta + CV + normalized degradation
 # ============================================================================
 
 def run_scaling_analysis(all_results):
@@ -694,7 +699,13 @@ def run_scaling_analysis(all_results):
     - Wilcoxon rank-sum (2D vs 25D raw costs)
     - Cliff's delta
     - CV at 2D and 25D
-    - Degradation ratio: mean_25D / mean_2D
+    - Normalized degradation: (mean_25D - mean_2D) / max(|mean_2D|, eps)
+
+    The plain ratio mean_25D / mean_2D is undefined when the 2D mean is zero
+    (exact convergence, e.g. sphere 2D at 0.0), which would inject inf into
+    research reports and NaN into the colormap. The normalized absolute
+    degradation is well-defined for every cell; when the baseline is above
+    eps it behaves like the ratio minus 1.
     """
     rows = []
     for fname in SCALABLE_FUNCTIONS:
@@ -732,11 +743,9 @@ def run_scaling_analysis(all_results):
             mean_2d  = float(np.mean(costs_2d))
             mean_25d = float(np.mean(costs_25d))
 
-            # Degradation ratio
-            if abs(mean_2d) > 1e-300:
-                deg_ratio = mean_25d / mean_2d
-            else:
-                deg_ratio = float('inf') if abs(mean_25d) > 1e-300 else 1.0
+            # Normalized degradation: finite for every baseline. eps=1e-12
+            # swallows float-noise baselines (e.g. 1e-16 ackley residuals).
+            deg_ratio = (mean_25d - mean_2d) / max(abs(mean_2d), 1e-12)
 
             row = {
                 'fname': fname,
@@ -830,6 +839,92 @@ def make_figure5_curves(all_results):
 # 9. CHARTING
 # ============================================================================
 
+def _render_benchmark_pair_chart(out_dir, bench_key, entry, n_runs):
+    """Render one per-benchmark convergence + boxplot figure.
+
+    Top-level so it can run as a process-pool task (spawn-compatible);
+    each task re-applies the rcParams itself, which keeps the output
+    identical regardless of the pool's start method.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update({
+        'figure.facecolor': CLR_BG, 'axes.facecolor': CLR_SURF,
+        'axes.edgecolor': CLR_GRID, 'axes.labelcolor': CLR_TEXT,
+        'text.color': CLR_TEXT, 'xtick.color': CLR_TEXT,
+        'ytick.color': CLR_TEXT, 'grid.color': CLR_GRID,
+        'font.size': 9,
+    })
+
+    fname = entry['hyde_bin']['fname']
+    dim   = entry['hyde_bin']['dim']
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(f'{fname.upper()} {dim}D — HyDE variants vs HyGO',
+                 fontsize=13, fontweight='bold')
+
+    all_negative = True
+    for ak in ALGO_KEYS:
+        curve = entry[ak]['mean_curve']
+        ax1.plot(curve, label=ALGO_LABELS[ak],
+                 color=ALGO_COLOURS[ak], linewidth=2)
+        if any(v > 0 for v in curve):
+            all_negative = False
+    ax1.set_xlabel('Generation')
+    ax1.set_ylabel(f'Best Cost (mean of {n_runs} runs)')
+    if not all_negative:
+        ax1.set_yscale('symlog', linthresh=1e-10)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title('Mean Convergence Curve')
+
+    data   = [entry[ak]['raw_costs'] for ak in ALGO_KEYS]
+    labels = [ALGO_LABELS[ak]        for ak in ALGO_KEYS]
+    bp = ax2.boxplot(data, tick_labels=labels, patch_artist=True)
+    for patch, ak in zip(bp['boxes'], ALGO_KEYS):
+        patch.set_facecolor(ALGO_COLOURS[ak])
+        patch.set_alpha(0.7)
+    for element in ['whiskers', 'caps', 'medians']:
+        for line in bp[element]:
+            line.set_color(CLR_TEXT)
+    ax2.set_ylabel('Best Cost')
+    ax2.set_title(f'Final Cost Distribution ({n_runs} runs)')
+    ax2.ticklabel_format(axis='y', useOffset=False)
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f'{bench_key}.png'),
+                dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _render_benchmark_pair_charts(out_dir, all_results, n_runs):
+    """Render every per-benchmark figure, in parallel across a process
+    pool when several benchmarks are present (each figure is independent;
+    the payloads stay in the parent thanks to copy-on-write fork, so this
+    cuts the dominant share of chart export time)."""
+    items = list(all_results.items())
+    if len(items) <= 1:
+        _render_benchmark_pair_chart(out_dir, *items[0], n_runs)
+        return
+    from concurrent.futures import ProcessPoolExecutor
+
+    workers = min(8, os.cpu_count() or 1, len(items))
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        # map propagates the first worker exception, preserving the
+        # caller's whole-failure semantics
+        for _ in ex.map(
+            _render_benchmark_pair_chart,
+            [out_dir] * len(items),
+            [k for k, _ in items],
+            [e for _, e in items],
+            [n_runs] * len(items),
+        ):
+            pass
+
+
 def make_charts(all_results, kruskal_results, margin_results):
     try:
         import matplotlib
@@ -847,48 +942,8 @@ def make_charts(all_results, kruskal_results, margin_results):
         'font.size': 9,
     })
 
-    # --- Per-benchmark: convergence + box plot ---
-    for bench_key, entry in all_results.items():
-        fname = entry['hyde_bin']['fname']
-        dim   = entry['hyde_bin']['dim']
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        fig.suptitle(f'{fname.upper()} {dim}D — HyDE variants vs HyGO',
-                     fontsize=13, fontweight='bold')
-
-        all_negative = True
-        for ak in ALGO_KEYS:
-            curve = entry[ak]['mean_curve']
-            ax1.plot(curve, label=ALGO_LABELS[ak],
-                     color=ALGO_COLOURS[ak], linewidth=2)
-            if any(v > 0 for v in curve):
-                all_negative = False
-        ax1.set_xlabel('Generation')
-        ax1.set_ylabel(f'Best Cost (mean of {N_RUNS} runs)')
-        if not all_negative:
-            ax1.set_yscale('symlog', linthresh=1e-10)
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_title('Mean Convergence Curve')
-
-        data   = [entry[ak]['raw_costs'] for ak in ALGO_KEYS]
-        labels = [ALGO_LABELS[ak]        for ak in ALGO_KEYS]
-        bp = ax2.boxplot(data, tick_labels=labels, patch_artist=True)
-        for patch, ak in zip(bp['boxes'], ALGO_KEYS):
-            patch.set_facecolor(ALGO_COLOURS[ak])
-            patch.set_alpha(0.7)
-        for element in ['whiskers', 'caps', 'medians']:
-            for line in bp[element]:
-                line.set_color(CLR_TEXT)
-        ax2.set_ylabel('Best Cost')
-        ax2.set_title(f'Final Cost Distribution ({N_RUNS} runs)')
-        ax2.ticklabel_format(axis='y', useOffset=False)
-        ax2.grid(True, alpha=0.3)
-
-        fig.tight_layout()
-        fig.savefig(os.path.join(CHART_DIR, f'{bench_key}.png'),
-                    dpi=150, bbox_inches='tight')
-        plt.close(fig)
+    # --- Per-benchmark: convergence + box plot (parallel pool) ---
+    _render_benchmark_pair_charts(CHART_DIR, all_results, N_RUNS)
 
     # --- (d) Margin vs HyGO: wins bar chart ---
     wins = {k: 0 for k in HYDE_KEYS}
@@ -955,7 +1010,7 @@ def _clip_degradation_for_display(deg_matrix):
 
 
 def make_scaling_chart(scaling_results):
-    """(e) Bar chart of CV at 25D and degradation ratio heatmap."""
+    """(e) Bar chart of CV at 25D and normalized degradation heatmap."""
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -1026,8 +1081,9 @@ def make_scaling_chart(scaling_results):
             txt = f"{val:.1f}" if abs(val) < 1e6 else f"{val:.1e}"
             ax.text(j, i, txt, ha='center', va='center', fontsize=7,
                     color='white' if deg_display[i, j] > deg_display.max() * 0.6 else 'black')
-    fig.colorbar(im, ax=ax, label='Degradation Ratio (mean_25D / mean_2D)')
-    ax.set_title('(e) Degradation Ratio: 2D → 25D (lower = scales better)',
+    fig.colorbar(im, ax=ax,
+                 label='Normalized Degradation ((mean_25D - mean_2D) / max(mean_2D, 1e-12))')
+    ax.set_title('(e) Normalized Degradation: 2D → 25D (lower = scales better)',
                  fontweight='bold')
     fig.tight_layout()
     fig.savefig(os.path.join(CHART_DIR, 'qe_degradation_heatmap.png'),
@@ -1378,7 +1434,7 @@ def print_report(all_results, friedman_obj, kruskal_results, cochran_result,
     # ── (e) Dimensionality scaling ──
     print(f"\n{'='*120}")
     print("  (e) DIMENSIONALITY SCALING — 2D vs 25D")
-    print("  Wilcoxon rank-sum + Cliff's delta + CV + degradation ratio")
+    print("  Wilcoxon rank-sum + Cliff's delta + CV + normalized degradation")
     print(f"  {len(SCALABLE_FUNCTIONS)} scalable functions: {', '.join(SCALABLE_FUNCTIONS)}")
     print(f"  alpha = {ALPHA}")
     print(f"{'='*120}")
@@ -1395,17 +1451,17 @@ def print_report(all_results, friedman_obj, kruskal_results, cochran_result,
                   f"d={row['cliffs_delta']:+.3f}({row['d_magnitude'][:3]})  "
                   f"mean_2D={row['mean_2d']:>10.4e}  mean_25D={row['mean_25d']:>10.4e}  "
                   f"CV_2D={row['cv_2d']:.4f}  CV_25D={row['cv_25d']:.4f}  "
-                  f"deg_ratio={row['degradation_ratio']:.2f}  {row['direction']}")
+                  f"norm_deg={row['degradation_ratio']:.2f}  {row['direction']}")
 
     # Summary: which algorithm degrades least
-    print("\n  Consistency at 25D (mean CV) and mean degradation ratio:")
+    print("\n  Consistency at 25D (mean CV) and mean normalized degradation:")
     for ak in ALGO_KEYS:
         ak_rows = [r for r in scaling_results if r['algo_key'] == ak]
         mean_cv25 = float(np.mean([r['cv_25d'] for r in ak_rows])) if ak_rows else float('nan')
         mean_deg  = float(np.mean([r['degradation_ratio'] for r in ak_rows
                                    if np.isfinite(r['degradation_ratio'])])) if ak_rows else float('nan')
         print(f"    {ALGO_LABELS[ak]:>10}: mean CV_25D = {mean_cv25:.4f},  "
-              f"mean degradation ratio = {mean_deg:.2f}")
+              f"mean normalized degradation = {mean_deg:.2f}")
     best_cv_key = min(
         ALGO_KEYS,
         key=lambda ak: float(np.mean([r['cv_25d'] for r in scaling_results
@@ -1441,8 +1497,15 @@ def save_per_run_csv(algo_key, fname, dim, results):
             ])
             writer.writerow([])
             writer.writerow(['evaluation', 'best_cost'])
-            for ev_idx, cost in enumerate(r['cost_history'], start=1):
-                writer.writerow([ev_idx, cost])
+            history = r['cost_history']
+            if history:
+                # one bulk write instead of a writerow per evaluation:
+                # 20k+ python-level CSV calls per run dominated the export
+                # (values are plain numbers, so plain formatting is
+                # byte-identical to the csv dialect)
+                f.write("\r\n".join(
+                    f"{i},{c}" for i, c in enumerate(history, start=1)
+                ) + "\r\n")
 
 
 def save_summary_csv(all_results):
@@ -1832,7 +1895,7 @@ def generate_docx_report(all_results, friedman_obj, kruskal_results,
         "(b) Cochran\u2019s Q + per-scenario chi-square. "
         "(c) Friedman on wall times + Kruskal-Wallis + speedup ratios. "
         "(d) Wilcoxon rank-sum + Cliff\u2019s delta + bootstrap 95% CI. "
-        "(e) Wilcoxon + Cliff\u2019s delta + CV + degradation ratio.")
+        "(e) Wilcoxon + Cliff\u2019s delta + CV + normalized degradation.")
 
     from datetime import datetime
     _para(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -2052,7 +2115,7 @@ def generate_docx_report(all_results, friedman_obj, kruskal_results,
                 f"{ALGO_LABELS[ak]}: significant degradation on "
                 f"{n_deg}/{len(ak_rows)} functions, "
                 f"mean CV at 25D = {mean_cv25:.4f}, "
-                f"mean degradation ratio = {mean_deg:.2f}.")
+                f"mean normalized degradation = {mean_deg:.2f}.")
 
         best_cv_key = min(
             ALGO_KEYS,
@@ -2065,7 +2128,7 @@ def generate_docx_report(all_results, friedman_obj, kruskal_results,
 
         _add_table(
             ['Function', 'Algorithm', 'U', 'p', 'Sig.', "d",
-             'CV 2D', 'CV 25D', 'Deg. Ratio', 'Dir.'],
+             'CV 2D', 'CV 25D', 'Norm. Degradation', 'Dir.'],
             [[row['fname'], row['algo_label'],
               f"{row['u_stat']:.0f}", f"{row['p_value']:.2e}",
               'Yes' if row['sig'] else 'No',
@@ -2073,12 +2136,16 @@ def generate_docx_report(all_results, friedman_obj, kruskal_results,
               f"{row['cv_2d']:.4f}", f"{row['cv_25d']:.4f}",
               f"{row['degradation_ratio']:.2f}",
               row['direction']] for row in scaling_results],
-            description="Dimensionality scaling analysis with degradation ratio.")
+            description=("Dimensionality scaling analysis. Normalized "
+                         "degradation = (mean_25D - mean_2D) / "
+                         "max(mean_2D, 1e-12); finite even for exact 2D "
+                         "convergence (2D mean of 0)."))
 
         _add_chart(os.path.join(CHART_DIR, 'qe_cv_25d.png'),
                    "Coefficient of Variation at 25D per algorithm for each scalable benchmark.")
         _add_chart(os.path.join(CHART_DIR, 'qe_degradation_heatmap.png'),
-                   "Degradation ratio heatmap: mean_25D / mean_2D (lower = scales better).")
+                   "Normalized degradation heatmap: (mean_25D - mean_2D) / "
+                   "max(mean_2D, 1e-12) (lower = scales better).")
 
     doc.add_page_break()
 

@@ -593,7 +593,7 @@ export function Cv25dFigure({
   );
 }
 
-/** (e) Degradation-ratio heatmap, mirroring qe_degradation_heatmap.png. */
+/** (e) Normalized-degradation heatmap, mirroring qe_degradation_heatmap.png. */
 export function DegradationHeatmapFigure({
   scaling,
 }: {
@@ -616,7 +616,7 @@ export function DegradationHeatmapFigure({
     const displayRatio = (v: number | null): number =>
       v === null || !Number.isFinite(v) ? colorMax : Math.min(v, colorMax);
     const ratioLabel = (v: number | null): string => {
-      if (v === null || !Number.isFinite(v)) return "inf";
+      if (v === null || !Number.isFinite(v)) return "n/a";
       return Math.abs(v) < 1e6 ? v.toFixed(1) : v.toExponential(1);
     };
     const data = fnames.flatMap((f, j) =>
@@ -699,7 +699,7 @@ export function DegradationHeatmapFigure({
   return (
     <Figure
       testId="fig-e-heatmap"
-      caption="Degradation ratio 2D to 25D - lower means it scales better"
+      caption="Normalized degradation 2D to 25D - (mean 25D - mean 2D) / max(mean 2D, 1e-12); lower means it scales better"
       option={option}
       height={Math.max(220, ALGO_KEYS.length * 44)}
     />
