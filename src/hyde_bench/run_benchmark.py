@@ -944,6 +944,16 @@ def make_charts(all_results, kruskal_results, margin_results):
     plt.close(fig)
 
 
+def _clip_degradation_for_display(deg_matrix):
+    """Clip degradation ratios for heatmap display. The percentile is taken
+    over finite values only: inf ratios (zero-mean 2D runs) would make
+    np.percentile return nan, and clip(x, 0, nan) wipes every cell to nan,
+    rendering the whole heatmap blank."""
+    finite = deg_matrix[np.isfinite(deg_matrix)]
+    clip_hi = np.percentile(finite, 95) * 1.2 if finite.size else 1.0
+    return np.clip(deg_matrix, 0, clip_hi)
+
+
 def make_scaling_chart(scaling_results):
     """(e) Bar chart of CV at 25D and degradation ratio heatmap."""
     try:
@@ -1000,8 +1010,10 @@ def make_scaling_chart(scaling_results):
                         if r['fname'] == fn and r['algo_key'] == ak), None)
             deg_matrix[i, j] = row['degradation_ratio'] if row else 1.0
 
-    # Clip for display
-    deg_display = np.clip(deg_matrix, 0, np.percentile(deg_matrix, 95) * 1.2)
+    # Clip for display. The percentile must ignore non-finite ratios: inf
+    # (zero-mean 2D runs) makes np.percentile return nan, and clip(x, 0, nan)
+    # wipes every cell to nan — rendering the whole heatmap blank.
+    deg_display = _clip_degradation_for_display(deg_matrix)
 
     im = ax.imshow(deg_display, aspect='auto', cmap='YlOrRd')
     ax.set_xticks(range(n_fn))

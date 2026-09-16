@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import echarts, { type EChartsOption } from "@/lib/echarts";
-import { toast } from "sonner";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Copy,
@@ -63,6 +61,7 @@ import {
 } from "@/lib/schemas";
 import { useSurface } from "@/hooks/useSurface";
 import { useReplayPayload } from "@/hooks/useReplayPayload";
+import { EchartsHost as Chart } from "@/components/charts/EchartsHost";
 import Replay3D from "@/components/scene/Replay3D";
 import { AnalysesReport } from "@/components/results/AnalysesReport";
 import {
@@ -70,6 +69,8 @@ import {
   ReportSkeleton,
 } from "@/components/results/ResultsSkeletons";
 import { pyInvokeValidated, subscribeValidated } from "@/lib/api";
+import { toast } from "sonner";
+import type { EChartsOption } from "@/lib/echarts";
 import { formatDuration, formatMs, formatSci } from "@/lib/formatters";
 
 const EXPORT_GROUPS = [
@@ -89,43 +90,6 @@ function quartiles(values: number[]): [number, number, number, number, number] {
     return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
   };
   return [sorted[0], q(0.25), q(0.5), q(0.75), sorted[sorted.length - 1]];
-}
-
-/**
- * Simple echarts host: the instance is created once per mount and option
- * changes are applied as incremental setOption updates instead of tearing
- * down and re-initializing the whole chart (canvas + renderer) on every
- * option identity change.
- */
-function Chart({
-  option,
-  height = 300,
-}: {
-  option: EChartsOption;
-  height?: number;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<echarts.ECharts | null>(null);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const chart = echarts.init(containerRef.current);
-    chartRef.current = chart;
-    const onResize = () => chart.resize();
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("resize", onResize);
-      chart.dispose();
-      chartRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    // runs after the init effect on mount, so the chart always exists here
-    chartRef.current?.setOption(option, { lazyUpdate: true });
-  }, [option]);
-
-  return <div ref={containerRef} style={{ width: "100%", height }} />;
 }
 
 interface RunDetailProps {

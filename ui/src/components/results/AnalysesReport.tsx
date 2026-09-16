@@ -7,6 +7,16 @@ import {
   type ScenarioResultRow,
 } from "@/lib/schemas";
 import {
+  BootstrapCiFigure,
+  ConvergenceRateFigure,
+  Cv25dFigure,
+  DegradationHeatmapFigure,
+  MarginWinsFigure,
+  ObjectiveErrorWinsFigure,
+  WallTimePerBenchmarkFigure,
+  WallTimeSummaryFigure,
+} from "@/components/results/AnalysesFigures";
+import {
   Table,
   TableBody,
   TableCell,
@@ -290,6 +300,7 @@ export function AnalysesReport({
             ))}
           </TableBody>
         </Table>
+        <ObjectiveErrorWinsFigure kruskal={analysis.kruskal_per_scenario} />
       </Section>
 
       <Section id="b" title="Convergence Rate" narrative={narrativeB}>
@@ -340,6 +351,7 @@ export function AnalysesReport({
             </span>
           ))}
         </p>
+        <ConvergenceRateFigure scenarioResults={scenarioResults} />
       </Section>
 
       <Section id="c" title="Wall-Clock Cost per Run" narrative={narrativeC}>
@@ -365,6 +377,8 @@ export function AnalysesReport({
             ))}
           </TableBody>
         </Table>
+        <WallTimeSummaryFigure scenarioResults={scenarioResults} />
+        <WallTimePerBenchmarkFigure scenarioResults={scenarioResults} />
       </Section>
 
       <Section
@@ -442,6 +456,10 @@ export function AnalysesReport({
             ))}
           </TableBody>
         </Table>
+        <MarginWinsFigure margins={margins} />
+        {HYDE_KEYS.map((hk) => (
+          <BootstrapCiFigure key={hk} margins={margins} hydeKey={hk} />
+        ))}
       </Section>
 
       {scalingStats && narrativeE && (
@@ -500,6 +518,8 @@ export function AnalysesReport({
               </TableBody>
             </Table>
           </div>
+          <Cv25dFigure scaling={scaling} />
+          <DegradationHeatmapFigure scaling={scaling} />
         </Section>
       )}
     </div>

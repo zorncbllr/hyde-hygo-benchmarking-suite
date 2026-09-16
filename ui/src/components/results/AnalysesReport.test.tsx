@@ -1,11 +1,16 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AnalysesReport } from "./AnalysesReport";
 import {
   analysisSummaryResponseSchema,
   type AnalysisSummary,
   type ScenarioResultRow,
 } from "@/lib/schemas";
+
+vi.mock("@/lib/echarts", () => {
+  const chart = { setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() };
+  return { default: { init: vi.fn(() => chart) } };
+});
 
 function makeScenarioRows(): ScenarioResultRow[] {
   const base = {
@@ -229,5 +234,25 @@ describe("AnalysesReport", () => {
       />,
     );
     expect(screen.getByText("inf")).toBeInTheDocument();
+  });
+
+  it("renders the report figures (a)-(e) as charts", () => {
+    render(
+      <AnalysesReport
+        analysis={makeAnalysis()}
+        scenarioResults={makeScenarioRows()}
+        nRuns={2}
+      />,
+    );
+    expect(screen.getByTestId("fig-a-wins")).toBeInTheDocument();
+    expect(screen.getByTestId("fig-b-conv")).toBeInTheDocument();
+    expect(screen.getByTestId("fig-c-summary")).toBeInTheDocument();
+    expect(screen.getByTestId("fig-c-per-benchmark")).toBeInTheDocument();
+    expect(screen.getByTestId("fig-d-wins")).toBeInTheDocument();
+    for (const hk of ["hyde_bin", "hyde_qub", "hyde_con"]) {
+      expect(screen.getByTestId(`fig-d-ci-${hk}`)).toBeInTheDocument();
+    }
+    expect(screen.getByTestId("fig-e-cv")).toBeInTheDocument();
+    expect(screen.getByTestId("fig-e-heatmap")).toBeInTheDocument();
   });
 });
